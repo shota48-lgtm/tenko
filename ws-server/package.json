@@ -1,0 +1,13 @@
+{
+  "name": "tenko-ws-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  }
+}
