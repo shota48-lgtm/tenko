@@ -140,4 +140,12 @@ roads: 前={"h":[13],"v":[20]} 後={"h":[13],"v":[20]}
 
 ## 6. コミット
 
-（末尾の `git --no-pager log --oneline` を参照）
+```
+ce2ab00 fix(village): 道の中心を村の中心に合わせる
+7f2fe86 Merge branch 'feature/phase45-office'
+4f58152 docs: Phase 4.10 の報告にコミット一覧とSTATEの更新を反映
+936ecc1 fix: 開いた直後に建物が出ない問題と、印が部屋名で決まる問題を直す
+```
+
+ブランチは `fix/village-center`。main への切り替え・マージ・push は行っていない。
+DDL は不要だったため実行していない。
