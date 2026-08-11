@@ -38,6 +38,8 @@ export default function ApprovalsPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [reasons, setReasons] = useState<Record<number, string>>({});
+  // 押してから一覧が入れ替わるまでの間、押せたことが分かるようにする
+  const [busy, setBusy] = useState<number | null>(null);
   const [me, setMe] = useState(1);
 
   const load = useCallback(async (uid: number) => {
@@ -64,18 +66,24 @@ export default function ApprovalsPage() {
   }, [load]);
 
   const act = async (id: number, action: "approve" | "return") => {
-    const body: Record<string, unknown> = { action, user: me };
-    if (action === "return") body.reason = reasons[id] ?? "";
-    const res = await fetch("/api/attendance/approvals/" + id, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
-      setError(j.error ?? "操作できませんでした");
+    setBusy(id);
+    setError(null);
+    try {
+      const body: Record<string, unknown> = { action, user: me };
+      if (action === "return") body.reason = reasons[id] ?? "";
+      const res = await fetch("/api/attendance/approvals/" + id, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setError(j.error ?? "操作できませんでした");
+      }
+      await load(me);
+    } finally {
+      setBusy(null);
     }
-    await load(me);
   };
 
   return (
@@ -144,7 +152,14 @@ export default function ApprovalsPage() {
               本人の確定: {new Date(it.confirmed_at).toLocaleString()}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <button onClick={() => act(it.id, "approve")} className="rounded-sm border border-stone-800 bg-stone-800 px-3 py-1 text-xs text-stone-50 hover:bg-stone-700">承認</button>
+              <button
+                onClick={() => act(it.id, "approve")}
+                disabled={busy === it.id}
+                className="rounded-sm border border-stone-800 bg-stone-800 px-3 py-1 text-xs text-stone-50
+                           hover:bg-stone-700 disabled:opacity-50"
+              >
+                {busy === it.id ? "処理中…" : "承認"}
+              </button>
               <input
                 placeholder="差し戻しの理由"
                 value={reasons[it.id] ?? ""}
@@ -155,9 +170,11 @@ export default function ApprovalsPage() {
               />
               <button
                 onClick={() => act(it.id, "return")}
-                className="rounded-sm border border-stone-400 bg-stone-50 px-3 py-1 text-xs text-stone-700 hover:bg-stone-200"
+                disabled={busy === it.id}
+                className="rounded-sm border border-stone-400 bg-stone-50 px-3 py-1 text-xs text-stone-700
+                           hover:bg-stone-200 disabled:opacity-50"
               >
-                差し戻し
+                {busy === it.id ? "処理中…" : "差し戻し"}
               </button>
             </div>
           </li>
