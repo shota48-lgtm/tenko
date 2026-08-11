@@ -48,6 +48,7 @@ const jpost = async (u, body, method = "POST") => {
   log("");
   log("=== 機能5: 修正申請 ===");
   const own = (await db.query("SELECT id, kind, status FROM attendance_records WHERE user_id=$1 AND corrects_record_id IS NULL ORDER BY id LIMIT 1", [member])).rows[0];
+  // 修正申請は元の記録と同じ種別でなければ通らない（審査役Cの指摘で入れた検証）
   log("  対象にする自分の記録: " + JSON.stringify(own));
 
   const bad = [
@@ -63,8 +64,8 @@ const jpost = async (u, body, method = "POST") => {
   }
 
   const ok = await jpost("/api/attendance/corrections", {
-    user: member, kind: "leave", eventAt: "2026-08-11T18:30:00+09:00",
-    reason: "退勤を押し忘れました", correctsRecordId: own.id,
+    user: member, kind: own.kind, eventAt: "2026-08-11T09:30:00+09:00",
+    reason: "時刻を間違えて記録していました", correctsRecordId: own.id,
   });
   log("  正しい申請: status=" + ok.status + " " + JSON.stringify(ok.j.correction));
   const corrId = ok.j.correction ? Number(ok.j.correction.id) : null;
@@ -121,7 +122,9 @@ const jpost = async (u, body, method = "POST") => {
     catch (e) { log("  確定済みの下書きの UPDATE: 例外 -> " + e.message); }
   }
   // 4) 他人の勤怠を承認できないこと（4通り）
-  const sub = (await db.query("SELECT id FROM attendance_records WHERE status='submitted' AND user_id=$1 ORDER BY id LIMIT 1", [member])).rows[0];
+  // 4通りの承認テスト用に、承認待ちの記録を1件用意する
+  await jpost("/api/attendance/corrections", { user: member, kind: "break", eventAt: "2026-08-11T12:00:00+09:00", reason: "承認テスト用" });
+  const sub = (await db.query("SELECT id FROM attendance_records WHERE status='submitted' AND user_id=$1 ORDER BY id DESC LIMIT 1", [member])).rows[0];
   if (sub) {
     for (const [label, uid] of [["本人(member)", member], ["無関係(member)", other], ["別上長(manager)", otherMgr], ["担当上長(manager)", manager]]) {
       const { status } = await jpost("/api/attendance/approvals/" + sub.id, { action: "approve", user: uid });
