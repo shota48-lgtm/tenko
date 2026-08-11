@@ -15,12 +15,19 @@ export type Presence = {
   roomId: number | null;
   // 話しかけてよいかの軸。在席状態とは独立して持つ（機能3）
   talk?: TalkStatus;
+  // 村の中の位置。Phase 4.8 で自由移動を入れたため、位置はその人が持つ。
+  // 決めるのは ws-server（画面側の値は信用しない）。まだ届いていない間だけ undefined
+  x?: number;
+  y?: number;
 };
 export type TalkStatus = "ok" | "later" | "focus";
 // 利用者ID -> 今日やること（機能1）
 export type NoteMap = Record<number, string>;
 // kind は rooms テーブルの列。どの建物で描くかは並び順ではなくこの値だけで決まる
-export type Room = { id: number; name: string; kind: "room" | "hall" };
+// capacity は定員（Phase 4.8）。満員の判定はサーバー側で行い、ここでは見せるだけ
+export type Room = { id: number; name: string; kind: "room" | "hall"; capacity?: number };
+// 部屋ごとの人数。ws-server が配る
+export type RoomCounts = Record<number, { used: number; capacity: number }>;
 export type BuildingRect = { room: Room; x: number; y: number; w: number; h: number };
 
 export const villageMap = mapData;
@@ -94,48 +101,37 @@ export function buildingRects(rooms: Room[]): BuildingRect[] {
   });
 }
 
-// 人物の配置。位置は状態が決める。自由移動は実装しない
-export function personSpots(rooms: Room[], people: Presence[]) {
-  const rects = buildingRects(rooms);
-  const out: { p: Presence; x: number; y: number }[] = [];
-  const byRoom = new Map<number, Presence[]>();
-  const plaza: Presence[] = [];
-  for (const p of people) {
-    if (p.roomId != null && rects.some((r) => r.room.id === p.roomId)) {
-      const arr = byRoom.get(p.roomId) ?? [];
-      arr.push(p);
-      byRoom.set(p.roomId, arr);
-    } else {
-      plaza.push(p);
-    }
-  }
-  // 部屋にいる人は、その建物の直下に横へずらして並べる。
-  // 人物を2倍にしたため、間隔も広げないと重なる（Phase 4.7）
-  // 人物を2倍にしたうえ、足元のリングと名前のラベルが載るため、間隔を広く取る
+// 村の端で切れないように、人物を村の中に収める。
+// 自由移動を入れたため、利用者は端まで行ける（Phase 4.8 作業7）
+export function clampToVillage(x: number, y: number) {
+  return {
+    x: Math.round(Math.min(Math.max(x, 0), VILLAGE_W - PERSON_SIZE)),
+    y: Math.round(Math.min(Math.max(y, 0), VILLAGE_H - PERSON_SIZE)),
+  };
+}
+
+// 位置がまだ届いていない人の初期値。ws-server/geometry.js の defaultSpot と揃える
+function fallbackSpot(index: number) {
   const gapX = PERSON_SIZE + 12;
   const gapY = PERSON_SIZE + 18;
-  for (const [roomId, arr] of byRoom) {
-    const r = rects.find((x) => x.room.id === roomId)!;
-    arr.forEach((p, i) => {
-      const col = i % 3;
-      const row = Math.floor(i / 3);
-      out.push({ p, x: r.x - gapX + col * gapX, y: r.y + 34 + row * gapY });
-    });
-  }
-  // どの部屋にも入っていない人は広場（噴水の周り）に並べる
-  plaza.forEach((p, i) => {
-    const wrap = Math.floor(i / villageMap.plazaSpots.length);
-    // 地図の広場の位置は16ドットの人物を前提に並べてある。
-    // 2倍にした分だけ横に広げ、重ならないようにする
-    const col = i % 8;
-    const row = Math.floor((i % villageMap.plazaSpots.length) / 8);
-    out.push({
-      p,
-      x: villageMap.plaza.x * TILE + col * gapX + wrap * 6,
-      y: villageMap.plaza.y * TILE + row * gapY + wrap * 6,
-    });
+  const col = index % 8;
+  const row = Math.floor(index / 8) % 3;
+  const wrap = Math.floor(index / 24);
+  return clampToVillage(
+    villageMap.plaza.x * TILE + col * gapX + wrap * 6,
+    villageMap.plaza.y * TILE + row * gapY + wrap * 6,
+  );
+}
+
+// 人物の配置。Phase 4.8 で「位置が状態を決める」形に変わったため、
+// 位置はその人が持っている値をそのまま使う。ここで並べ直さない。
+// 座標を決めるのは ws-server。画面側は受け取った値を村の中に収めるだけ
+export function personSpots(rooms: Room[], people: Presence[]) {
+  void rooms;
+  return people.map((p, i) => {
+    const at = p.x != null && p.y != null ? clampToVillage(p.x, p.y) : fallbackSpot(i);
+    return { p, x: at.x, y: at.y };
   });
-  return out;
 }
 
 // 地面・道・装飾だけを描く。中身は変わらないので、画面側は一度だけ描いて使い回す。
@@ -166,6 +162,11 @@ export function drawGround(ctx: CanvasRenderingContext2D, s: SpriteSheet) {
   for (const d of m.deco) paint(ctx, s, d.sprite, d.x * TILE, d.y * TILE);
 }
 
+// 建物の中の人をどう見せるか。2案を実機で見比べて決める（Phase 4.8 作業2）
+//   "show": そのまま重ねて描く。誰がいるか一目で分かる
+//   "hide": 建物の中の人は描かず、人数だけ出す。村がすっきりする
+export type OccupantsMode = "show" | "hide";
+
 // 変わるものだけを描く（建物の窓・噴水・人物）。在席が変わるたびに呼ぶのはこちら
 export function drawVillage(
   ctx: CanvasRenderingContext2D,
@@ -173,23 +174,38 @@ export function drawVillage(
   rooms: Room[],
   people: Presence[],
   withGround = true,
+  counts: RoomCounts = {},
+  occupants: OccupantsMode = "show",
 ) {
   ctx.imageSmoothingEnabled = false;
   const m = villageMap;
   if (withGround) drawGround(ctx, s);
 
-  // 建物。その部屋で会話中の人がいれば窓を明るくする
-  const talkingRooms = new Set(people.filter((p) => p.state === "talking" && p.roomId != null).map((p) => p.roomId));
+  // 建物。誰か入っていれば窓を明るくする
   buildingRects(rooms).forEach((r) => {
     const isHall = r.room.kind === "hall";
-    const lit = talkingRooms.has(r.room.id);
-    paint(ctx, s, (isHall ? "hall" : "house") + (lit ? "_lit" : ""), r.x, r.y);
+    const c = counts[r.room.id];
+    const used = c?.used ?? 0;
+    const cap = c?.capacity ?? r.room.capacity ?? 0;
+    paint(ctx, s, (isHall ? "hall" : "house") + (used > 0 ? "_lit" : ""), r.x, r.y);
+    if (cap > 0 && used >= cap) {
+      // 満員は枠で示す。窓の明るさは「誰かいる」と区別がつかないため、形を変える
+      ctx.save();
+      ctx.strokeStyle = "#8c2f2f";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+      ctx.setLineDash([3, 2]);
+      ctx.strokeStyle = "#e0c56a";
+      ctx.strokeRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+      ctx.restore();
+    }
   });
 
   paint(ctx, s, "fountain", m.fountain.x * TILE, m.fountain.y * TILE);
 
   // 退勤した人は描画しない（presence に載っていない人は描かれない）
   for (const spot of personSpots(rooms, people)) {
+    if (occupants === "hide" && spot.p.roomId != null) continue;
     const n = ((spot.p.colorIndex - 1) % 4) + 1;
     const x = Math.round(spot.x);
     const y = Math.round(spot.y);
@@ -236,15 +252,24 @@ export function drawNoteMarks(
 // 吹き出しの配置を作る。村にいる人のうち、今日やることを書いた人だけが対象。
 // 人物の配置（spots）も一緒に返す。画面側が名前とラベルを同じ座標に重ねるため、
 // 同じ計算を2回しないで済む
-export function bubbleLayoutFor(rooms: Room[], people: Presence[], notes: NoteMap) {
+export function bubbleLayoutFor(
+  rooms: Room[],
+  people: Presence[],
+  notes: NoteMap,
+  maxVisible?: number,
+  only?: number[],
+) {
   const spots = personSpots(rooms, people);
   const inputs: BubbleInput[] = [];
   for (const spot of spots) {
     const body = notes[spot.p.id];
     if (!body) continue;
+    // only が指定されていれば、その人の吹き出しだけを出す（マウスを乗せた人だけ出す方式）
+    if (only && !only.includes(Number(spot.p.id))) continue;
     inputs.push({ userId: spot.p.id, x: Math.round(spot.x), y: Math.round(spot.y), text: body });
   }
-  return { ...layoutBubbles(inputs, VILLAGE_W, VILLAGE_H), spots };
+  const opt = maxVisible == null ? {} : { maxVisible };
+  return { ...layoutBubbles(inputs, VILLAGE_W, VILLAGE_H, opt), spots };
 }
 
 export function hitBuilding(rooms: Room[], x: number, y: number): Room | null {

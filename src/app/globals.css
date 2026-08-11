@@ -1,17 +1,38 @@
 @import "tailwindcss";
 
-/* tenko の配色。
+/* tenko の配色（Phase 4.8 でトンマナを統一）。
    村がドット絵の暖色（草地・土・藁）であるため、画面全体もそれに寄せた明るい配色で固定する。
 
    ダークテーマは用意しない。理由:
      - 村の絵は明るい前提の配色で描いており、暗い背景に置くと浮く
      - 端末の設定で切り替わると、ドット絵の見え方が利用者ごとに変わり、
        「同じ村を見ている」という前提が崩れる
-   以前は prefers-color-scheme: dark を入れていたため、端末が暗色設定だと
-   背景が黒くなり、枠のない入力欄やボタンが背景に沈んで見えなくなっていた（実機で確認）。 */
+
+   色は村のパレット16色（src/sprites/variant-a.json）から採る。そこから採れば自動的に揃う。
+   例外は --paper だけで、これは 11 番（#e8c9a0）を白と混ぜて明るくした値。
+   画面全体を 11 番で塗ると濃すぎて、本文の可読性が落ちるため。
+
+   決めごと:
+     - 角丸は使わない。ドット絵に曲線は馴染まない
+     - 影は使わない。ドット絵に影は馴染まない（浮いて見える）
+     - 枠は 1px の濃色
+     - 本文は通常のゴシック。ドット絵フォントは使わない（長文が読めなくなる） */
 :root {
-  --background: #f5f5f4; /* stone-100 */
-  --foreground: #292524; /* stone-800 */
+  --tk-ink: #33302a;        /* 5  文字・枠 */
+  --tk-ink-soft: #6b6355;   /* 5 を薄めた色。補助的な文字 */
+  --tk-paper: #f4e9d6;      /* 11 を明るくした生成り。画面の地 */
+  --tk-paper-2: #e8c9a0;    /* 11 見出し・帯 */
+  --tk-line: #9c7b3f;       /* 7  区切り線 */
+  --tk-wood: #8a6742;       /* 9  押せるもの（濃い） */
+  --tk-wood-light: #b98f63; /* 8  押せるもの（明るい） */
+  --tk-straw: #c8a45c;      /* 6  強調の帯 */
+  --tk-red: #b2503a;        /* 13 異常・満員・切断 */
+  --tk-blue: #41668f;       /* 14 会議中 */
+  --tk-green: #5f7f45;      /* 15 在席 */
+  --tk-grass: #7f9c5e;      /* 1 */
+
+  --background: var(--tk-paper);
+  --foreground: var(--tk-ink);
 }
 
 @theme inline {
@@ -22,7 +43,83 @@
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--tk-paper);
+  color: var(--tk-ink);
+  /* 本文は読みやすさ優先。ドット絵フォントを使わない */
   font-family: system-ui, "Segoe UI", "Hiragino Kaku Gothic ProN", "Noto Sans JP", Meiryo, sans-serif;
+}
+
+/* ---- 共通の部品。画面ごとに書き分けると必ずずれるため、ここに集約する ---- */
+
+/* 枠のある面。角丸なし・影なし */
+.tk-panel {
+  background: var(--tk-paper);
+  border: 1px solid var(--tk-ink);
+}
+
+/* 見出しの帯 */
+.tk-head {
+  background: var(--tk-paper-2);
+  border-bottom: 1px solid var(--tk-ink);
+  color: var(--tk-ink);
+}
+
+/* 押せるもの。木の色を使い、押している間だけ沈む（影ではなく位置で示す） */
+.tk-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border: 1px solid var(--tk-ink);
+  background: var(--tk-wood-light);
+  color: #fff;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  cursor: pointer;
+}
+.tk-btn:hover { background: var(--tk-wood); }
+.tk-btn:active { transform: translateY(1px); }
+.tk-btn:focus-visible { outline: 2px solid var(--tk-ink); outline-offset: 1px; }
+.tk-btn:disabled { background: #cfc4ae; color: #6b6355; cursor: default; }
+
+/* 押せるもの（控えめ）。地の色に近い */
+.tk-btn-quiet {
+  border: 1px solid var(--tk-ink);
+  background: var(--tk-paper);
+  color: var(--tk-ink);
+}
+.tk-btn-quiet:hover { background: var(--tk-paper-2); }
+
+/* 選ばれている状態。色だけでなく反転で示す */
+.tk-btn-on {
+  border: 1px solid var(--tk-ink);
+  background: var(--tk-ink);
+  color: var(--tk-paper);
+}
+.tk-btn-on:hover { background: var(--tk-ink); }
+
+/* 入力欄。枠がないと地に沈むため必ず枠を引く */
+.tk-input {
+  border: 1px solid var(--tk-ink);
+  background: #fff;
+  color: var(--tk-ink);
+  padding: 0.25rem 0.4rem;
+  font-size: 0.8125rem;
+}
+.tk-input:focus { outline: 2px solid var(--tk-straw); outline-offset: -1px; }
+.tk-input::placeholder { color: #a09684; }
+
+/* 区切り線。細い破線でドット調にする */
+.tk-sep { border-bottom: 1px dashed var(--tk-line); }
+
+/* アイコンの枠。四角で囲む */
+.tk-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--tk-ink);
+  background: var(--tk-paper-2);
+  width: 1.75rem;
+  height: 1.75rem;
+  image-rendering: pixelated;
 }

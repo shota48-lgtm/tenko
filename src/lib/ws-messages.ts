@@ -27,7 +27,18 @@ export type PresenceSet = {
 /** 今の在席一覧をもう一度送ってほしい（再接続の直後に使う） */
 export type PresenceSync = { type: "presence.sync" };
 
-export type ClientToServer = PresenceSet | PresenceSync;
+/**
+ * 自分のアバターを動かす（Phase 4.8）。
+ * 利用者IDを持たないことが重要。動かせるのは「この接続の人」だけで、
+ * サーバーは接続に紐づいた人にしか適用しない。よって他人のアバターは動かせない。
+ */
+export type PresenceMove = { type: "presence.move"; x: number; y: number };
+
+/** 呼びかけ。通話は繋がない（次のフェーズ）。from は送らない（サーバーが接続から決める） */
+export type CallInvite = { type: "call.invite"; to: number; knewFocus?: boolean };
+export type CallRespond = { type: "call.respond"; to: number; answer: "accept" | "later" | "decline" };
+
+export type ClientToServer = PresenceSet | PresenceSync | PresenceMove | CallInvite | CallRespond;
 
 // ---- サーバー -> 画面 ----
 
@@ -42,7 +53,29 @@ export type PresenceList = {
     roomId: number | null;
     talk?: TalkStatus;
     connections?: number;
+    // 村の中の位置（Phase 4.8）。決めるのはサーバー
+    x?: number;
+    y?: number;
   }>;
+  /** 部屋ごとの人数と定員。満員かどうかを画面に出すために配る */
+  rooms?: Record<number, { used: number; capacity: number }>;
+};
+
+/** 移動や呼びかけを断った理由。押した本人にだけ返す */
+export type PresenceDenied = { type: "presence.denied"; reason: string; roomId?: number };
+export type CallDenied = { type: "call.denied"; reason: string };
+export type CallSent = { type: "call.sent"; to: number };
+
+/** 呼びかけが届いた。from はサーバーが接続から決めるため、なりすませない */
+export type CallIncoming = {
+  type: "call.incoming";
+  from: { id: number; name: string };
+  knewFocus?: boolean;
+};
+export type CallAnswered = {
+  type: "call.answered";
+  from: { id: number; name: string };
+  answer: "accept" | "later" | "decline";
 };
 
 /** 投稿が保存されたことの通知。保存は HTTP + DB が正で、これは知らせるだけ */
@@ -51,31 +84,38 @@ export type MessageCreated = {
   message: { id: number | string; room_id: number | string; body: string; user_id: number | string };
 };
 
-export type ServerToClient = PresenceList | MessageCreated;
+export type ServerToClient =
+  | PresenceList | MessageCreated
+  | PresenceDenied | CallIncoming | CallAnswered | CallDenied | CallSent;
 
 // ---- 送り手の役割 ----
 //
 // notifier: Next.js の API ルート。token を持つ接続だけが名乗れる。配信できるのはこの役だけ
 // viewer  : 画面。送れるのは下の VIEWER_ALLOWED にある種別だけで、それ以外は捨てられる
-export const VIEWER_ALLOWED: ReadonlyArray<ClientToServer["type"]> = ["presence.set", "presence.sync"];
+// ws-server 側は前方一致で見るため、"call." で名前空間ごと許可している
+export const VIEWER_ALLOWED: ReadonlyArray<string> = [
+  "presence.set", "presence.sync", "presence.move", "call.",
+];
 
 // ---- 将来 音声通話を足すときにここへ追加する ----
 //
 // 実装しない。何をどこに足せばよいかだけを残す。
+//
+// 通話の入り方は「近づくと聞こえる」ではなく「呼びかけ → 相手が承認 → 通話開始」に決めた（POの判断）。
+// 近接音声は、常に聞かれているかもしれない状態を作り、心理的安全性を損なうため採用しない。
+// call.invite / call.respond（承認のやりとり）は Phase 4.8 で実装済み。残るのは音声そのもの。
 //
 // 1) 種別を3つ足す（P2Pメッシュのシグナリング。6人程度までなら SFU は不要）
 //      call.offer     { type, to: userId, sdp }
 //      call.answer    { type, to: userId, sdp }
 //      call.candidate { type, to: userId, candidate }
 //    いずれも「特定の相手に届ける」必要があるため、宛先 to を持つ。
+//    宛先つきの転送は call.invite で実装済み（ws-server の socketsOf）。そのまま使える。
 //
-// 2) ws-server に「宛先つきの転送」を足す。
-//    今の broadcast は全員に配るため、シグナリングには使えない。
-//    presence の Map は ws -> 利用者 の向きなので、利用者ID -> ws の索引を1つ足すことになる。
+// 2) 開始のきっかけは call.respond の answer==="accept" にする。
+//    承認した側が offer を作る形にすれば、呼びかけた側は待つだけで済む。
 //
-// 3) VIEWER_ALLOWED に call.* を加える。
-//    受け入れの判定は名前空間単位（"call." で始まるか）で書けるようにしてあるため、
-//    ws-server 側の変更は許可リストへの追加だけで済む。
+// 3) VIEWER_ALLOWED は "call." で名前空間ごと許可済みのため、変更は不要。
 //
 // 4) メディアは Vercel も Railway も通らない（P2P）。TURN が要る場合のみ外部（Cloudflare 等）を使う。
 //    シグナリングは TCP なので、今の WebSocket サーバーにそのまま相乗りできる。

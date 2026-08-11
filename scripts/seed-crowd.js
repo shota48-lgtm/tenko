@@ -52,6 +52,23 @@ const TALKS = ["ok", "later", "focus"];
   }
   console.log("今日やることを入れた人数: " + wrote + "（残りは未記入のまま）");
 
+  // 建物を埋めるための移動先。Phase 4.8 から、部屋に入るには座標を動かす。
+  // 足元（絵の中央下）が建物の枠に入る位置を狙う。geometry.js の buildingAt と同じ考え方
+  const geo = require("../ws-server/geometry");
+  const rects = geo.buildingRects(
+    (await (await fetch(API + "/api/rooms")).json()).rooms,
+  );
+  const house = rects[0];             // 定員4の部屋
+  const hall = rects.find((r) => r.room.kind === "hall") || rects[6];  // 定員12の建物
+  // 先頭4人を定員4の部屋へ、次の12人を定員12の建物へ入れて、両方を満員にする
+  // 足元を建物の枠の中央に置く。y+PERSON_SIZE-4 が枠の中に入る必要がある
+  const inside = (b, i) => ({ x: b.x + ((i % 3) - 1) * 5, y: b.y - 12 + (i % 2) * 3 });
+  const target = (i) => {
+    if (i < 4) return inside(house, i);
+    if (i < 16) return inside(hall, i);
+    return null;
+  };
+
   // 在席を申告し続ける
   const sockets = [];
   for (let i = 0; i < users.length; i++) {
@@ -62,9 +79,10 @@ const TALKS = ["ok", "later", "focus"];
         type: "presence.set",
         user: { id: u.id, name: u.name, colorIndex: (i % 4) + 1 },
         state: STATES[i % STATES.length],
-        roomId: i < 6 ? (i % 3) + 1 : null,
         talk: TALKS[i % TALKS.length],
       }));
+      const t = target(i);
+      if (t) setTimeout(() => ws.send(JSON.stringify({ type: "presence.move", x: t.x, y: t.y })), 60);
     });
     sockets.push(ws);
     await new Promise((r) => setTimeout(r, 30));
