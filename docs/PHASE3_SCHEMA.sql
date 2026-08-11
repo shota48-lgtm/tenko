@@ -38,6 +38,11 @@ BEGIN
   IF OLD.status <> 'pending' THEN
     RAISE EXCEPTION '確定または却下済みの下書きは変更できません (id=%, status=%)', OLD.id, OLD.status;
   END IF;
+  -- BEFORE DELETE のトリガーで NEW を返すと NULL になり、削除が「エラーも出さずに無視される」。
+  -- 2026-08-11 に実測（未確定の行を DELETE して rowCount=0、行は残存）。DELETE では OLD を返すこと。
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
