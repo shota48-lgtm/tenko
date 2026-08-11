@@ -39,7 +39,9 @@ function classify(cp: number): "keep" | "space" | "drop" {
 // HTML として解釈させない責務は表示側（React のテキスト / Canvas の fillText）にある。
 // ここで < > を取り除くと「1 < 2」のような正当な入力が壊れるため、除去も変換もしない。
 // ここで見るのは「制御文字」と「長さ」だけ。
-export function sanitizeNote(input: unknown): SanitizeResult {
+// max は上限の文字数。既定は「今日やること」の80文字。
+// お知らせ（200文字）でも同じ検証を使うため、上限だけを外から渡せるようにしてある
+export function sanitizeNote(input: unknown, max: number = NOTE_MAX): SanitizeResult {
   if (typeof input !== "string") return { ok: false, reason: "本文は文字列で必要です" };
 
   // 全角と半角で数え方が変わらないよう NFC に寄せる
@@ -58,7 +60,7 @@ export function sanitizeNote(input: unknown): SanitizeResult {
   if (s.length === 0) return { ok: false, reason: "本文が空です" };
   // 長さはコードポイント数で数える。絵文字を2文字と数えて弾かないため
   const len = Array.from(s).length;
-  if (len > NOTE_MAX) return { ok: false, reason: `本文は ${NOTE_MAX} 文字までです（${len} 文字）` };
+  if (len > max) return { ok: false, reason: `本文は ${max} 文字までです（${len} 文字）` };
 
   return { ok: true, body: s };
 }

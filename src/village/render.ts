@@ -366,6 +366,19 @@ export function bubbleLayoutFor(
   return { ...layoutBubbles(inputs, VILLAGE_W, VILLAGE_H, opt), spots };
 }
 
+// 噴水（お知らせ）の当たり判定。建物と同じく、押しやすいよう少し広く取る
+export const fountainRect = {
+  x: villageMap.fountain.x * TILE,
+  y: villageMap.fountain.y * TILE,
+  w: 32,
+  h: 32,
+};
+export function hitFountain(x: number, y: number): boolean {
+  const m = 6;
+  const f = fountainRect;
+  return x >= f.x - m && x < f.x + f.w + m && y >= f.y - m && y < f.y + f.h + m;
+}
+
 export function hitBuilding(rooms: Room[], x: number, y: number): Room | null {
   for (const r of buildingRects(rooms)) {
     if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r.room;

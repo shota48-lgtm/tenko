@@ -72,6 +72,17 @@ function buildingAt(rooms, x, y) {
   return best;
 }
 
+// 噴水（お知らせ）。ここには立てない。
+// 人が乗ると、噴水より人物の判定が優先されてお知らせが押せなくなる（実機で確認）
+const FOUNTAIN = { x: map.fountain.x * TILE, y: map.fountain.y * TILE, w: 32, h: 32 };
+function onFountain(x, y) {
+  const cx = x + PERSON_SIZE / 2;
+  const cy = y + PERSON_SIZE / 2;
+  const m = 8;
+  return cx >= FOUNTAIN.x - m && cx < FOUNTAIN.x + FOUNTAIN.w + m
+    && cy >= FOUNTAIN.y - m && cy < FOUNTAIN.y + FOUNTAIN.h + m;
+}
+
 // 既定の立ち位置の候補。
 //
 // 村全体に格子を敷き、広場の中央に近い順に並べる。
@@ -100,4 +111,5 @@ function defaultSpot(index) {
 module.exports = {
   map, TILE, VILLAGE_W, VILLAGE_H, PERSON_SIZE, BOTTOM_MARGIN,
   buildingRects, buildingAt, clamp, isCoord, defaultSpot, SPOTS, ENTER_MARGIN,
+  FOUNTAIN, onFountain,
 };

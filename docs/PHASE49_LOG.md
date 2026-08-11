@@ -81,3 +81,71 @@ POが4回試して0回だったのは操作の問題ではなく、判定の位�
 直す前: 倍率=2    canvas=1280x832  縦スクロール=あり
 直した後: 倍率=1.95 canvas=1248x811  縦スクロール=なし（ページ側も無し）
 ```
+
+---
+
+## 4-2. 噴水（お知らせ）
+
+### 実行したDDL
+
+`docs/PHASE49_SCHEMA.sql` / `scripts/apply-phase49-ddl.js`。追加のみ。既存の表には触れない。
+
+```sql
+CREATE TABLE announcements (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id),
+  body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 200),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ
+);
+CREATE INDEX announcements_live_idx ON announcements (created_at DESC) WHERE deleted_at IS NULL;
+CREATE TABLE announcement_reads (
+  user_id BIGINT NOT NULL REFERENCES users(id),
+  last_read_announcement_id BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id)
+);
+```
+
+ロールバック（実行前に用意した。今は実行していない）:
+
+```sql
+DROP TABLE IF EXISTS announcement_reads;
+DROP TABLE IF EXISTS announcements;
+```
+
+### 決めたこと
+
+- **流れて消えない。** 行として残す。消すのは `deleted_at` を入れるだけで、行は消さない（誰が何を出したかを追えるようにするため）
+- 書ける・消せるのは **admin のみ**。役割はリクエストの値ではなく、毎回DBから引き直す
+- 未読は `read_states` と同じ形（1人1行・最後に読んだID）にした。考え方を揃えるため
+- 本文の検証は「今日やること」と同じ `sanitizeNote` を使う。上限だけ 200 文字に変えられるようにした
+
+### 実測（`node scripts\attack-phase49.js`）
+
+| 送ったもの | 結果 |
+|---|---|
+| member がお知らせを書く | 403「お知らせを書けるのは管理者のみです」 |
+| manager がお知らせを書く | 403（同上） |
+| admin がお知らせを書く | 201 |
+| DBに残った書き手 | `[6]`（admin だけ。他の役割は1件も入っていない） |
+| member / manager が消す | 403「お知らせを消せるのは管理者のみです」 |
+| admin が消す | 200（削除=1） |
+| 空文字 / 空白のみ | 400「本文が空です」 |
+| 201文字 | 400「本文は 200 文字までです（201 文字）」 |
+| 文字列でない | 400「本文は文字列で必要です」 |
+| 改行の混入 | 空白1つにまとめられて保存 |
+| ゼロ幅スペース | 落とされて保存 |
+| SQLらしき文字列 | 文字列として保存。`announcements` は健在 |
+| 存在しない利用者（999999 / -1 / 0 / SQL文字列） | いずれも401 |
+| 応答の Content-Type | `application/json` |
+
+### さらに見つかった不具合: 噴水の上に人が立つと押せない
+
+人物の当たり判定が噴水より優先されるため、噴水の上に誰かが立つとお知らせを開けなくなった（実機で確認）。
+
+- **噴水の上には立てないようにした**（サーバー側。移動でも初期配置でも避ける）
+- 未読が無いときも「お知らせ」の札を常時出すようにした（押せることに気づけるように）
+
+実測: 22人を村に入れて、噴水の上に立っている人は0人。
+実マウスの押し（`left_click`）で村のお知らせが開くことを確認した。

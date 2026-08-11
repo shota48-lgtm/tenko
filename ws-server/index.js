@@ -117,6 +117,7 @@ function freeSpot() {
   for (let i = 0; i < geo.SPOTS.length; i++) {
     const s = geo.defaultSpot(i);
     if (geo.buildingAt(rooms, s.x, s.y)) continue;
+    if (geo.onFountain(s.x, s.y)) continue;
     let taken = false;
     for (const p of presence.values()) {
       if (Math.abs(p.x - s.x) < geo.PERSON_SIZE && Math.abs(p.y - s.y) < geo.PERSON_SIZE) { taken = true; break; }
@@ -130,6 +131,8 @@ function freeSpot() {
 // 同じ建物に入ろうとしている場合もあるので、建物の判定より前には動かさない
 function nudge(self, at) {
   const overlaps = (x, y) => {
+    // 噴水の上には立てない。乗るとお知らせが押せなくなる
+    if (geo.onFountain(x, y)) return true;
     for (const q of presence.values()) {
       if (q.id === self.id) continue;
       if (Math.abs(q.x - x) < geo.PERSON_SIZE * 0.7 && Math.abs(q.y - y) < geo.PERSON_SIZE * 0.7) return true;

@@ -20,7 +20,7 @@ import Link from "next/link";
 import { ACTIVE_VARIANT, VARIANTS, sheet } from "@/sprites";
 import {
   drawVillage, drawGround, drawNoteMarks, bubbleLayoutFor, hitBuilding, hitPerson,
-  buildingRects, clampToVillage, buildingForAvatar, ENTER_MARGIN,
+  buildingRects, clampToVillage, buildingForAvatar, ENTER_MARGIN, hitFountain, fountainRect,
   VILLAGE_W, VILLAGE_H, PERSON_SIZE,
   type Presence, type Room, type NoteMap, type TalkStatus, type RoomCounts, type OccupantsMode,
 } from "@/village/render";
@@ -129,6 +129,14 @@ export default function VillagePage() {
   const [unread, setUnread] = useState<Record<number, number>>({});
   const [drafts, setDrafts] = useState<{ id: number; kind: string; eventAt: string; matchedText: string }[]>([]);
   const [showDrafts, setShowDrafts] = useState(false);
+  // 噴水のお知らせ（機能4-2）。書けるのは admin のみ。判定はAPI側
+  type Ann = { id: number; body: string; displayName: string; createdAt: string };
+  const [anns, setAnns] = useState<Ann[]>([]);
+  const [annUnread, setAnnUnread] = useState(0);
+  const [annCanWrite, setAnnCanWrite] = useState(false);
+  const [showAnns, setShowAnns] = useState(false);
+  const [annInput, setAnnInput] = useState("");
+  const [annError, setAnnError] = useState<string | null>(null);
   // 建物の中の人の見せ方。案2（隠して、乗せたときに人数と名前を出す）を採った。
   // 案1（重ねて描く）は、建物が32ドット四方なのに人物が32ドットあり、
   // 定員4でも建物が完全に隠れ、定員12では人物同士も潰れて誰も読めなくなる（実機で確認）。
@@ -152,6 +160,9 @@ export default function VillagePage() {
   useEffect(() => { talkRef.current = talk; }, [talk]);
   useEffect(() => { userRef.current = me; }, [me]);
 
+  // 「いま操作した」を記録する。描画中に Date.now() を呼ばないための入れ物
+  const touchActivity = useCallback(() => { lastActiveRef.current = Date.now(); }, []);
+
   const send = useCallback((obj: unknown) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
@@ -171,6 +182,17 @@ export default function VillagePage() {
       const d = await res.json();
       setUnread(d.unread ?? {});
       setDrafts(d.drafts ?? []);
+    } catch { /* 取れなくても村は描く */ }
+  }, []);
+
+  const loadAnns = useCallback(async (uid: number) => {
+    try {
+      const res = await fetch("/api/announcements?user=" + uid);
+      if (!res.ok) return;
+      const d = await res.json();
+      setAnns(d.announcements ?? []);
+      setAnnUnread(Number(d.unread ?? 0));
+      setAnnCanWrite(d.canWrite === true);
     } catch { /* 取れなくても村は描く */ }
   }, []);
 
@@ -206,9 +228,10 @@ export default function VillagePage() {
       void fetch("/api/me?user=" + u.id).then((r) => r.json())
         .then((d) => setMyRole(d.me?.role ?? null)).catch(() => {});
       void loadVillage(u.id);
+      void loadAnns(u.id);
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes, loadVillage, router]);
+  }, [loadNotes, loadVillage, loadAnns, router]);
 
   // WebSocket。在席・位置・呼びかけを配る
   useEffect(() => {
@@ -458,7 +481,7 @@ export default function VillagePage() {
       dragRef.current = null;
       setDrag(null);
       setDropTarget(null);
-      lastActiveRef.current = Date.now();
+      touchActivity();
       setAutoAway(false);
       if (moved) return;
       // 動かしていないなら、押しただけとして自分のメニューを出す
@@ -475,6 +498,8 @@ export default function VillagePage() {
       return;
     }
     setPicked(null);
+    // 噴水はお知らせ。村の中心にあり、一番目立つ場所なので、ここに置く
+    if (hitFountain(at.x, at.y)) { void openAnns(); return; }
     const room = hitBuilding(rooms, at.x, at.y);
     if (room) router.push("/rooms/" + room.id);
   };
@@ -584,6 +609,31 @@ export default function VillagePage() {
   // 村にいる人数。「メンバー」を押す動機を出すために添える
   const inVillage = roster.filter((r) => r.state !== "off").length;
 
+  // 噴水を押したとき。開いた時点で既読にする
+  const openAnns = async () => {
+    setShowAnns(true);
+    await fetch("/api/announcements", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user: me.id }),
+    }).catch(() => {});
+    await loadAnns(me.id);
+  };
+
+  const postAnn = async () => {
+    setAnnError(null);
+    const res = await fetch("/api/announcements", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: annInput, user: me.id }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setAnnError(j.error ?? "書けませんでした");
+      return;
+    }
+    setAnnInput("");
+    await loadAnns(me.id);
+  };
+
   const decideDraft = async (id: number, action: "confirm" | "reject") => {
     await fetch("/api/attendance/drafts/" + id, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -639,6 +689,15 @@ export default function VillagePage() {
             {stale && "（表示は切断前のものです）"}
           </span>
         )}
+        {/* 認証が無いことを利用者にも見える形で出す（6-3）。
+            目立ちすぎず、しかし気づける位置に置く。README にも記載 */}
+        <span
+          className="border border-[var(--tk-ink)] px-1.5 py-0.5 text-[10px]"
+          style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
+          title="URLの me= を変えると誰にでもなりすませます。本番では使えません"
+        >
+          お試し版・ログインなし（誰にでもなりすませます）
+        </span>
         {debug && (
           <span className="ml-auto flex items-center gap-2 text-[11px]">
             <button onClick={() => setOccupants((v) => (v === "show" ? "hide" : "show"))} className="tk-btn tk-btn-quiet px-1.5 py-0.5">
@@ -787,6 +846,23 @@ export default function VillagePage() {
                 ドラッグで移動 / 押すとメニュー
               </div>
             )}
+
+            {/* 噴水のお知らせ。未読があれば赤く、無ければ控えめに、常時出す。
+                札を常時出すのは、噴水が押せることに気づけるようにするため */}
+            <button
+              onClick={openAnns}
+              className="absolute z-10 border border-[var(--tk-ink)] px-1 text-[10px] font-bold"
+              style={{
+                left: (fountainRect.x + fountainRect.w / 2) * SCALE,
+                top: (fountainRect.y - 14) * SCALE,
+                transform: "translateX(-50%)",
+                background: annUnread > 0 ? "var(--tk-red)" : "var(--tk-paper)",
+                color: annUnread > 0 ? "#fff" : "var(--tk-ink)",
+              }}
+              title="村のお知らせ"
+            >
+              お知らせ{annUnread > 0 ? " " + annUnread : ""}
+            </button>
 
             {/* 勤怠の下書きの印。自分のアバターの頭の上に出す。
                 tenko の主張は「チャットが勤怠になる」なので、村を見ただけで
@@ -1056,6 +1132,53 @@ export default function VillagePage() {
         </span>
       </nav>
       <div className="h-8" />
+
+      {/* 噴水のお知らせ。流れて消えない（重要な連絡に向かないため）*/}
+      {showAnns && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center" style={{ background: "rgba(51,48,42,0.45)" }}>
+          <div className="tk-panel flex max-h-[80vh] w-[32rem] flex-col p-0">
+            <div className="tk-head flex items-center px-3 py-2">
+              <h2 className="text-sm font-bold">村のお知らせ</h2>
+              <button onClick={() => setShowAnns(false)} className="tk-btn tk-btn-quiet ml-auto px-2 py-0.5 text-xs">閉じる</button>
+            </div>
+            <ul className="flex-1 overflow-y-auto">
+              {anns.length === 0 && (
+                <li className="px-3 py-6 text-center text-xs" style={{ color: "var(--tk-ink-soft)" }}>
+                  お知らせはまだありません
+                </li>
+              )}
+              {anns.map((a) => (
+                <li key={a.id} className="tk-sep px-3 py-2">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xs font-bold">{a.displayName}</span>
+                    <span className="text-[11px] tabular-nums" style={{ color: "var(--tk-ink-soft)" }}>
+                      {new Date(a.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-sm leading-6" style={{ wordBreak: "break-word" }}>{a.body}</p>
+                </li>
+              ))}
+            </ul>
+            {/* 書けるのは管理者のみ。ここで隠すのは見せ方の話で、
+                書けるかどうかの判定はAPI側で行っている */}
+            {annCanWrite && (
+              <div className="border-t border-[var(--tk-ink)] p-2">
+                <div className="flex gap-2">
+                  <input
+                    value={annInput}
+                    onChange={(e) => setAnnInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") void postAnn(); }}
+                    placeholder="全員に知らせること（200文字まで）"
+                    className="tk-input flex-1 text-sm"
+                  />
+                  <button onClick={postAnn} className="tk-btn text-sm">出す</button>
+                </div>
+                {annError && <p className="mt-1 text-xs font-bold" style={{ color: "var(--tk-red)" }}>{annError}</p>}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 呼びかけを受けたとき。相手の返事だけが通話を始められる（近接では始まらない）*/}
       {incoming && (
