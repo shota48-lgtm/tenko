@@ -285,7 +285,9 @@ export default function VillagePage() {
         const p = byId.get(u.id);
         return {
           id: u.id,
-          name: p?.name ?? u.displayName,
+          // 名前は DB の表示名を正とする。
+          // presence の name は本人が名乗った値であり、認証が無い今は他人の名前を騙れる（S6）
+          name: u.displayName,
           state: (p?.state ?? "off") as Presence["state"] | "off",
           talk: p?.talk,
           note: notes[u.id] ?? "",
