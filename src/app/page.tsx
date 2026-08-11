@@ -9,7 +9,11 @@
 //     再送しても重複しないことは DB の一意制約が保証する
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const ROOM_ID = 1;
+function currentRoomId() {
+  if (typeof window === "undefined") return 1;
+  const q = Number(new URLSearchParams(window.location.search).get("room"));
+  return Number.isInteger(q) && q > 0 ? q : 1;
+}
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 
 type Message = {
@@ -27,6 +31,7 @@ type Pending = { clientMsgId: string; body: string };
 type ConnState = "接続中" | "切断" | "再接続中";
 
 export default function Home() {
+  const roomId = typeof window === "undefined" ? 1 : currentRoomId();
   const [messages, setMessages] = useState<Message[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
   const [conn, setConn] = useState<ConnState>("再接続中");
@@ -49,11 +54,11 @@ export default function Home() {
 
   // 差分取得。初回と再接続のたびに呼ぶ
   const fetchSince = useCallback(async () => {
-    const res = await fetch(`/api/rooms/${ROOM_ID}/messages?after=${lastIdRef.current}`);
+    const res = await fetch(`/api/rooms/${roomId}/messages?after=${lastIdRef.current}`);
     if (!res.ok) return;
     const data = (await res.json()) as { messages: Message[] };
     mergeMessages(data.messages.map((m) => ({ ...m, id: Number(m.id) })));
-  }, [mergeMessages]);
+  }, [mergeMessages, roomId]);
 
   // 待ち行列の送出。HTTP が通らない間は行列に残す
   const flushPending = useCallback(async () => {
@@ -64,7 +69,7 @@ export default function Home() {
         const item = pendingRef.current[0];
         let ok = false;
         try {
-          const res = await fetch(`/api/rooms/${ROOM_ID}/messages`, {
+          const res = await fetch(`/api/rooms/${roomId}/messages`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ clientMsgId: item.clientMsgId, body: item.body }),
@@ -82,7 +87,7 @@ export default function Home() {
       sendingRef.current = false;
       await fetchSince();
     }
-  }, [fetchSince]);
+  }, [fetchSince, roomId]);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -107,7 +112,7 @@ export default function Home() {
           const data = JSON.parse(e.data as string);
           if (data.type === "message.created" && data.message) {
             const m = data.message;
-            if (Number(m.room_id) !== ROOM_ID) return;
+            if (Number(m.room_id) !== roomId) return;
             // 通知は取りこぼしうるので、通知を合図に差分取得もかける
             void fetchSince();
           }
@@ -139,7 +144,7 @@ export default function Home() {
       if (timer) clearTimeout(timer);
       ws?.close();
     };
-  }, [fetchSince, flushPending]);
+  }, [fetchSince, flushPending, roomId]);
 
   const onSend = () => {
     const body = input.trim();
@@ -153,7 +158,8 @@ export default function Home() {
 
   return (
     <main style={{ padding: 24, fontFamily: "sans-serif", maxWidth: 720 }}>
-      <h1>tenko / 部屋 {ROOM_ID}</h1>
+      <h1>tenko / 部屋 {roomId}</h1>
+      <p><a href="/village">村の画面へ</a></p>
       <p>
         接続状態: <strong data-testid="conn">{conn}</strong>
         {pending.length > 0 && <span>（未送信 {pending.length} 件）</span>}
