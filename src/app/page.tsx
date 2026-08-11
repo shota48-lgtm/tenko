@@ -555,7 +555,8 @@ export default function VillagePage() {
         )}
       </header>
 
-      <div className="flex items-start gap-3 p-3">
+      {/* 一覧を畳んでいるときは村を中央に置く。左に寄せると右が大きく空く（審査役B）*/}
+      <div className={"flex items-start gap-3 p-3 " + (showRoster ? "" : "justify-center")}>
         <div className="tk-panel max-h-[calc(100vh-6.5rem)] overflow-auto bg-black">
           <div className="relative" style={{ width: VILLAGE_W * SCALE, height: VILLAGE_H * SCALE }}>
             <canvas
@@ -604,8 +605,15 @@ export default function VillagePage() {
                     {TALK_TAG[t.talk]}
                   </span>
                 )}
+                {/* 自分だけは「あなた」と出す。
+                    説明文を消したので、どれが自分か分からないと掴むこともできない（審査役B）*/}
+                {t.isMe && (
+                  <span className="px-1 text-[9px] leading-[13px] font-bold" style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}>
+                    あなた
+                  </span>
+                )}
                 <span
-                  className="px-1 text-[10px] leading-[12px] text-white"
+                  className="px-1 text-[10px] leading-[12px]"
                   style={{ background: t.isMe ? "var(--tk-ink)" : "rgba(51,48,42,0.8)", color: t.isMe ? "#f2d489" : "#fff" }}
                 >
                   {t.name}
