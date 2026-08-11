@@ -242,12 +242,12 @@ function decoA() {
 }
 function decoB() {
   var d = {}; var g;
-  // 1 街灯
-  g = G(16, 16); rect(g, 7, 5, 8, 15, 5); rect(g, 5, 2, 10, 4, 9); rect(g, 6, 3, 9, 4, 10);
-  rect(g, 5, 15, 10, 15, 2); d.deco_1 = g;
-  // 2 看板
-  g = G(16, 16); rect(g, 7, 9, 8, 15, 9); rect(g, 2, 2, 13, 9, 8); rect(g, 2, 2, 13, 2, 9); rect(g, 2, 9, 13, 9, 9);
-  rect(g, 4, 4, 11, 4, 5); rect(g, 4, 6, 9, 6, 5); rect(g, 4, 15, 11, 15, 2); d.deco_2 = g;
+  // 1 街路樹（刈り込んだ木）。村の空白を埋める主役なので、面積を大きく取る
+  g = G(16, 16); rect(g, 7, 10, 8, 14, 9); disc(g, 7.5, 6, 5, 15); disc(g, 6, 5, 3, 1); disc(g, 10, 8, 2, 2);
+  rect(g, 5, 15, 11, 15, 2); d.deco_1 = g;
+  // 2 低木
+  g = G(16, 16); disc(g, 7.5, 10, 4.5, 15); disc(g, 6, 9, 2.5, 1); disc(g, 10, 11, 1.5, 2);
+  rect(g, 4, 15, 11, 15, 2); d.deco_2 = g;
   // 3 ベンチ
   g = G(16, 16); rect(g, 1, 8, 14, 9, 9); rect(g, 1, 5, 14, 5, 9); rect(g, 2, 6, 2, 7, 9); rect(g, 13, 6, 13, 7, 9);
   rect(g, 2, 10, 3, 14, 5); rect(g, 12, 10, 13, 14, 5); rect(g, 1, 15, 14, 15, 2); d.deco_3 = g;
@@ -268,9 +268,11 @@ function decoB() {
   for (var x4 = 2; x4 < 16; x4 += 4) rect(g, x4, 7, x4, 9, 9);
   for (var x5 = 4; x5 < 16; x5 += 4) rect(g, x5, 10, x5, 12, 9);
   rect(g, 0, 14, 15, 14, 2); d.deco_7 = g;
-  // 8 刈り込んだ木
-  g = G(16, 16); rect(g, 7, 10, 8, 14, 9); disc(g, 7.5, 6, 4.5, 15); disc(g, 6, 5, 2.5, 1);
-  rect(g, 4, 15, 11, 15, 2); d.deco_8 = g;
+  // 8 街灯
+  g = G(16, 16); rect(g, 7, 5, 8, 15, 5); rect(g, 5, 2, 10, 4, 9); rect(g, 6, 3, 9, 4, 10);
+  rect(g, 5, 15, 10, 15, 2); d.deco_8 = g;
+  // 地図は3案で共通なので、どの案でも deco_1 と deco_2 が「空白を埋める緑」になるよう並べ替える。
+  // ここを揃えないと、B では村が街灯だらけになる（実測して気づいた）
   return d;
 }
 function decoC() {
@@ -279,7 +281,7 @@ function decoC() {
   g = G(16, 16); rect(g, 5, 13, 10, 14, 8); rect(g, 6, 9, 9, 13, 8); rect(g, 5, 6, 10, 9, 8);
   rect(g, 6, 7, 9, 8, 10); rect(g, 3, 4, 12, 6, 6); rect(g, 6, 3, 9, 3, 6); rect(g, 4, 15, 11, 15, 2); d.deco_1 = g;
   // 2 生垣
-  g = G(16, 16); rect(g, 0, 5, 15, 13, 1); disc(g, 3, 5, 3, 1); disc(g, 8, 4, 3, 1); disc(g, 13, 5, 3, 1);
+  g = G(16, 16); rect(g, 0, 4, 15, 13, 1); disc(g, 3, 4, 4, 1); disc(g, 8, 3, 4, 1); disc(g, 13, 4, 4, 1); rect(g, 0, 12, 15, 13, 2);
   for (var i3 = 0; i3 < 16; i3 += 2) px(g, i3, 7 + (i3 % 4), 15);
   for (var i4 = 1; i4 < 16; i4 += 3) px(g, i4, 10, 2);
   rect(g, 0, 14, 15, 14, 2); d.deco_2 = g;
@@ -324,7 +326,7 @@ var VARIANTS = {
     palette: ["transparent", "#7f9370", "#6a7d5e", "#a9a79f", "#8f8d86", "#2f3138", "#7a6f6a", "#57504d",
       "#cfc9bd", "#9a9184", "#f3dea6", "#e8c9a0", "#6f6396", "#a84f47", "#46688f", "#5b7a52"],
     houseStyle: "hip", hallStyle: "gable", deco: decoB,
-    labels: { deco_1: "街灯", deco_2: "看板", deco_3: "ベンチ", deco_4: "花壇", deco_5: "鉢植え", deco_6: "石畳の模様", deco_7: "低い石塀", deco_8: "刈り込んだ木" },
+    labels: { deco_1: "街路樹", deco_2: "低木", deco_3: "ベンチ", deco_4: "花壇", deco_5: "鉢植え", deco_6: "石畳の模様", deco_7: "低い石塀", deco_8: "街灯" },
   },
   c: {
     name: "和の集落",
@@ -332,7 +334,7 @@ var VARIANTS = {
     palette: ["transparent", "#79916a", "#63795a", "#b6ae9c", "#9a9384", "#2b2b28", "#5e6b73", "#414c54",
       "#d8cdb4", "#8a7250", "#f0dc9e", "#e8c9a0", "#6b5f8c", "#a04a3c", "#3f6382", "#55764a"],
     houseStyle: "kawara", hallStyle: "kawara", deco: decoC,
-    labels: { deco_1: "石灯籠", deco_2: "生垣", deco_3: "竹", deco_4: "松", deco_5: "井戸", deco_6: "暖簾", deco_7: "砂利だまり", deco_8: "酒樽" },
+    labels: { deco_1: "松", deco_2: "生垣", deco_3: "竹", deco_4: "石灯籠", deco_5: "井戸", deco_6: "暖簾", deco_7: "砂利だまり", deco_8: "酒樽" },
   },
 };
 
