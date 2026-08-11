@@ -4,7 +4,7 @@
 //   40x26 タイル + 装飾231個 + 人物 を DOM 要素で持つと 1000 要素を超え、
 //   状態が変わるたびの再描画が重くなる。Canvas なら1枚に描き切れる。
 import mapData from "./map.json";
-import { layoutBubbles, type BubbleInput, type BubbleLayout } from "./bubbles";
+import { layoutBubbles, BUBBLE, type BubbleInput, type BubbleLayout } from "./bubbles";
 import type { SpriteSheet } from "@/sprites";
 
 export type Presence = {
@@ -213,7 +213,7 @@ export function personSpots(rooms: Room[], people: Presence[]) {
 // 地面・道・装飾だけを描く。中身は変わらないので、画面側は一度だけ描いて使い回す。
 // 1ドットずつ塗るため、村全体で約27万回の描画になる。
 // 在席が変わるたびにこれを描き直すと画面が固まる（実機で確認）。
-export function drawGround(ctx: CanvasRenderingContext2D, s: SpriteSheet) {
+export function drawGround(ctx: CanvasRenderingContext2D, s: SpriteSheet, quietDeco = true) {
   ctx.imageSmoothingEnabled = false;
   const m = villageMap;
   for (let y = 0; y < m.height; y++) {
@@ -235,7 +235,17 @@ export function drawGround(ctx: CanvasRenderingContext2D, s: SpriteSheet) {
       paint(ctx, s, "path_edge_e", (rx + 1) * TILE, y * TILE, true);
     }
   }
+  // 装飾231個は村らしさを作るが、人物が埋もれる（作業4-3）。
+  // 数を減らすと村が寂しくなるため、彩度ではなく「地に馴染ませる」方向にした。
+  // 描いたうえから地の色を薄くかけると、人物（この後で描く）だけが前に出る
   for (const d of m.deco) paint(ctx, s, d.sprite, d.x * TILE, d.y * TILE);
+  if (quietDeco) {
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = s.palette[1];   // 草の色。装飾だけでなく地面全体にかける
+    ctx.fillRect(0, 0, VILLAGE_W, VILLAGE_H);
+    ctx.restore();
+  }
 }
 
 // 建物の中の人をどう見せるか。2案を実機で見比べて決める（Phase 4.8 作業2）
@@ -306,6 +316,17 @@ export function drawVillage(
     // 状態は足元のリングで示す。人物の下に敷くので先に描く
     drawStateRing(ctx, spot.p.state, x, y);
     paint(ctx, s, "person_" + spot.p.state + "_" + n, x, y, false, PERSON_SCALE);
+    // 自分は枠で囲む。50人いると「あなた」の札だけでは探すのに時間がかかる（作業2-3）
+    if (Number(spot.p.id) === meId) {
+      ctx.save();
+      ctx.strokeStyle = "#f2d489";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x - 3, y - 3, PERSON_SIZE + 6, PERSON_SIZE + 6);
+      ctx.strokeStyle = "#33302a";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x - 4.5, y - 4.5, PERSON_SIZE + 9, PERSON_SIZE + 9);
+      ctx.restore();
+    }
   }
 }
 
@@ -352,6 +373,8 @@ export function bubbleLayoutFor(
   notes: NoteMap,
   maxVisible?: number,
   only?: number[],
+  // 全員分を出すときは1行に絞る。2行のままだと高さが倍になり、他人の名前を覆う
+  maxLines?: number,
 ) {
   const spots = personSpots(rooms, people);
   const inputs: BubbleInput[] = [];
@@ -362,8 +385,18 @@ export function bubbleLayoutFor(
     if (only && !only.includes(Number(spot.p.id))) continue;
     inputs.push({ userId: spot.p.id, x: Math.round(spot.x), y: Math.round(spot.y), text: body });
   }
-  const opt = maxVisible == null ? {} : { maxVisible };
-  return { ...layoutBubbles(inputs, VILLAGE_W, VILLAGE_H, opt), spots };
+  const opt: Partial<typeof BUBBLE> = {};
+  if (maxVisible != null) opt.maxVisible = maxVisible;
+  if (maxLines != null) opt.maxLines = maxLines;
+  // 名前のラベルの位置。吹き出しがここに重ならないようにする。
+  // 画面側は名前を人物の下（y + PERSON_SIZE + 5）に置いている
+  const blockers = spots.map((s) => ({
+    x: Math.round(s.x) - 8,
+    y: Math.round(s.y) + PERSON_SIZE + 3,
+    w: PERSON_SIZE + 16,
+    h: 10,
+  }));
+  return { ...layoutBubbles(inputs, VILLAGE_W, VILLAGE_H, opt, blockers), spots };
 }
 
 // 噴水（お知らせ）の当たり判定。建物と同じく、押しやすいよう少し広く取る

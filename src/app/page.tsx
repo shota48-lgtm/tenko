@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ACTIVE_VARIANT, VARIANTS, sheet } from "@/sprites";
+import { BUBBLE } from "@/village/bubbles";
 import {
   drawVillage, drawGround, drawNoteMarks, bubbleLayoutFor, hitBuilding, hitPerson,
   buildingRects, clampToVillage, buildingForAvatar, ENTER_MARGIN, hitFountain, fountainRect,
@@ -124,6 +125,8 @@ export default function VillagePage() {
   const [fitScale, setFitScale] = useState(ZOOM_CLOSE);
   // ドラッグ中に、いま入る建物
   const [dropTarget, setDropTarget] = useState<number | null>(null);
+  // 装飾を地に馴染ませるか（作業4-3）。?debug=1 で切り替えて見比べられる
+  const [quietDeco, setQuietDeco] = useState(true);
   // 部屋ごとの未読件数と、自分の未確定の勤怠の下書き。
   // tenko の主張は「チャットが勤怠になる」なので、村にその両方が出ている必要がある
   const [unread, setUnread] = useState<Record<number, number>>({});
@@ -143,6 +146,12 @@ export default function VillagePage() {
   // 比較のため ?debug=1 では切り替えられるようにしてある
   const [occupants, setOccupants] = useState<OccupantsMode>("hide");
   const [bubbleMax, setBubbleMax] = useState(BUBBLE_MAX);
+  // 吹き出しの見せ方。3案を実機で見比べて決める（作業3-1）
+  //   "few"  : 常時3件 + 乗せた人（Phase 4.8 の形）
+  //   "all"  : 全員分を出す（重なりは避けるが、避けきれない分は頭上の印だけになる）
+  //   "hover": 乗せた人だけ出す
+  // 既定は「全員」。22人で重なり0・名前を覆う数0 を実測して決めた（PHASE49_LOG.md）
+  const [bubbleMode, setBubbleMode] = useState<"few" | "all" | "hover">("all");
   const [myRole, setMyRole] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -373,10 +382,15 @@ export default function VillagePage() {
     const hit = base.find((p) => Number(p.id) === hoverPerson);
     return hit ? [hit, ...base.filter((p) => p !== hit)] : base;
   }, [people, occupants, hoverPerson, me.id]);
-  const layout = useMemo(
-    () => bubbleLayoutFor(rooms, bubblePeople, notes, bubbleMax),
-    [rooms, bubblePeople, notes, bubbleMax],
-  );
+  const layout = useMemo(() => {
+    if (bubbleMode === "hover") {
+      // 乗せた人だけ。誰も乗せていなければ吹き出しは出ない
+      return bubbleLayoutFor(rooms, bubblePeople, notes, 1, hoverPerson == null ? [] : [hoverPerson]);
+    }
+    const max = bubbleMode === "all" ? bubblePeople.length : bubbleMax;
+    // 全員分を出すときは1行に絞る（2行だと高さが倍になり、他人の名前を覆う）
+    return bubbleLayoutFor(rooms, bubblePeople, notes, max, undefined, bubbleMode === "all" ? 1 : undefined);
+  }, [rooms, bubblePeople, notes, bubbleMax, bubbleMode, hoverPerson]);
 
   // 地面は変わらないので一度だけ描いて使い回す（毎回描くと約27万回になり固まる）
   const ground = useMemo(() => {
@@ -386,9 +400,9 @@ export default function VillagePage() {
     off.height = VILLAGE_H;
     const octx = off.getContext("2d");
     if (!octx) return null;
-    drawGround(octx, sheet(variant));
+    drawGround(octx, sheet(variant), quietDeco);
     return off;
-  }, [variant]);
+  }, [variant, quietDeco]);
 
   useEffect(() => {
     const cv = canvasRef.current;
@@ -703,8 +717,14 @@ export default function VillagePage() {
             <button onClick={() => setOccupants((v) => (v === "show" ? "hide" : "show"))} className="tk-btn tk-btn-quiet px-1.5 py-0.5">
               建物の中: {occupants === "show" ? "案1 重ねて描く" : "案2 隠す"}
             </button>
-            <button onClick={() => setBubbleMax((v) => (v === 3 ? 5 : v === 5 ? 8 : 3))} className="tk-btn tk-btn-quiet px-1.5 py-0.5">
-              吹き出し {bubbleMax}件
+            <button
+              onClick={() => setBubbleMode((m) => (m === "few" ? "all" : m === "all" ? "hover" : "few"))}
+              className="tk-btn tk-btn-quiet px-1.5 py-0.5"
+            >
+              吹き出し: {bubbleMode === "few" ? "案1 常時" + bubbleMax + "件" : bubbleMode === "all" ? "案2 全員" : "案3 乗せた人だけ"}
+            </button>
+            <button onClick={() => setQuietDeco((v) => !v)} className="tk-btn tk-btn-quiet px-1.5 py-0.5">
+              装飾: {quietDeco ? "馴染ませる" : "そのまま"}
             </button>
             {(["a", "b", "c"] as const).map((k) => (
               <button key={k} onClick={() => setVariant(k)} disabled={k === variant} className={"tk-btn px-1.5 py-0.5 " + (k === variant ? "tk-btn-on" : "tk-btn-quiet")}>
@@ -762,7 +782,9 @@ export default function VillagePage() {
                 {TALK_TAG[t.talk] && (
                   <span
                     className="px-1 text-[9px] leading-[13px] text-white"
-                    style={{ background: t.talk === "focus" ? "var(--tk-red)" : "var(--tk-wood)" }}
+                    // 色は状態（足元のリング）だけに使う。
+                    // 話しかけ可否まで色で示すと、どちらが主の情報か分からなくなる（作業3-3）
+                    style={{ background: "var(--tk-ink)", color: "var(--tk-paper)" }}
                   >
                     {TALK_TAG[t.talk]}
                   </span>
@@ -785,25 +807,28 @@ export default function VillagePage() {
 
             {/* 今日やること */}
             {layout.boxes.map((b) => {
-              const half = (b.w * SCALE) / 2;
-              const cx = b.tailX * SCALE;
-              const right = VILLAGE_W * SCALE;
-              let left = cx;
-              let tx = "-50%";
-              if (cx - half < 2) { left = 2; tx = "0"; }
-              else if (cx + half > right - 2) { left = right - 2; tx = "-100%"; }
               return (
                 <div
                   key={b.userId}
-                  className="pointer-events-none absolute border border-[var(--tk-ink)] px-1 py-0.5
-                             text-[11px] leading-[13px]"
+                  className="pointer-events-none absolute overflow-hidden border border-[var(--tk-ink)]"
                   style={{
-                    left, top: b.tailY * SCALE, transform: `translate(${tx}, -100%)`,
-                    maxWidth: 190, whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    // 配置の計算が決めた位置に置く。
+                    // しっぽの位置に描いていたため、重なりを避けた結果が捨てられていた（実測で判明）
+                    left: b.x * SCALE,
+                    top: b.y * SCALE,
+                    // 配置の計算（bubbles.ts）が出した大きさで描く。
+                    // CSS に大きさを任せていたところ、計算上は重なっていない吹き出しが
+                    // 実際には他人の名前を覆っていた（19件中17件。実測）
+                    width: b.w * SCALE,
+                    height: b.h * SCALE,
+                    padding: `${BUBBLE.padY * SCALE}px ${BUBBLE.padX * SCALE}px`,
+                    fontSize: BUBBLE.charW * SCALE * 0.95,
+                    lineHeight: `${BUBBLE.lineHeight * SCALE}px`,
+                    whiteSpace: "pre-wrap", wordBreak: "break-all",
                     background: "var(--tk-paper)", color: "var(--tk-ink)",
                   }}
                 >
-                  {b.lines.join("")}
+                  {b.lines.join("\n")}
                 </div>
               );
             })}
@@ -1079,7 +1104,7 @@ export default function VillagePage() {
                     {r.talk && TALK_TAG[r.talk] && (
                       <span
                         className="shrink-0 px-1 text-[9px] text-white"
-                        style={{ background: r.talk === "focus" ? "var(--tk-red)" : "var(--tk-wood)" }}
+                        style={{ background: "var(--tk-ink)", color: "var(--tk-paper)" }}
                       >
                         {TALK_TAG[r.talk]}
                       </span>

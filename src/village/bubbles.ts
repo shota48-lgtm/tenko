@@ -104,14 +104,19 @@ export function layoutBubbles(
   villageW: number,
   villageH: number,
   opt: Partial<typeof BUBBLE> = {},
+  // 吹き出しを置いてはいけない場所（名前のラベルなど）。
+  // 吹き出し同士だけを避けていたところ、19件中17件が誰かの名前を覆っていた（実測）
+  blockers: { x: number; y: number; w: number; h: number }[] = [],
 ): BubbleLayout {
   const cfg = { ...BUBBLE, ...opt };
   const shown = inputs.slice(0, cfg.maxVisible);
   const boxes: BubbleBox[] = [];
   const overflow: BubbleInput[] = inputs.slice(cfg.maxVisible);
 
+  const overlaps = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) =>
+    a.x < b.x + b.w + 2 && b.x < a.x + a.w + 2 && a.y < b.y + b.h + 2 && b.y < a.y + a.h + 2;
   const hits = (a: { x: number; y: number; w: number; h: number }) =>
-    boxes.some((b) => a.x < b.x + b.w + 2 && b.x < a.x + a.w + 2 && a.y < b.y + b.h + 2 && b.y < a.y + a.h + 2);
+    boxes.some((b) => overlaps(a, b)) || blockers.some((b) => overlaps(a, b));
 
   for (const it of shown) {
     const lines = wrap(it.text, cfg.maxCharsPerLine, cfg.maxLines);
