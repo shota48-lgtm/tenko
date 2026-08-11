@@ -110,6 +110,20 @@ function sendList(immediate) {
   }, 50);
 }
 
+// 村に入るときの立ち位置。空いているところを探す。
+// 同じ場所に重ねると、下になった人はクリックで選べなくなる（実機で確認）
+function freeSpot() {
+  for (let i = 0; i < 200; i++) {
+    const s = geo.defaultSpot(i);
+    let taken = false;
+    for (const p of presence.values()) {
+      if (Math.abs(p.x - s.x) < geo.PERSON_SIZE && Math.abs(p.y - s.y) < geo.PERSON_SIZE) { taken = true; break; }
+    }
+    if (!taken) return s;
+  }
+  return geo.defaultSpot(presence.size);
+}
+
 // 利用者ID -> その人の接続。呼びかけを特定の相手だけに届けるために使う
 function socketsOf(userId) {
   const out = [];
@@ -168,7 +182,7 @@ wss.on("connection", (ws, req) => {
       const prev = presence.get(ws);
       const state = ["idle", "away", "talking", "resting"].indexOf(msg.state) >= 0 ? msg.state : "idle";
       // 位置がまだ無い人にだけ初期値を与える。以後はその人の座標が正
-      const spot = prev ? { x: prev.x, y: prev.y } : geo.defaultSpot(presence.size);
+      const spot = prev ? { x: prev.x, y: prev.y } : freeSpot();
       presence.set(ws, {
         id: Number(u.id) || 0,
         // 名前も他人の画面に出るため、長さを切る。中継しかしないサーバー側でも防ぐ
@@ -247,9 +261,12 @@ wss.on("connection", (ws, req) => {
         ws.send(JSON.stringify({ type: "call.denied", reason: "相手は村にいません" }));
         return;
       }
+      // 送るのは利用者IDだけ。名前は送らない。
+      // presence の name は自己申告で騙れるため、画面はDBの表示名で引き直す
+      // （Phase 4.6 で村の名前ラベルに対して同じ直しをしている）
       const payload = JSON.stringify({
         type: "call.incoming",
-        from: { id: from.id, name: from.name },
+        from: { id: from.id },
         // 呼びかけた側が相手の「話しかけて」を分かったうえで押したか。相手側の表示に使う
         knewFocus: msg.knewFocus === true,
       });
@@ -262,8 +279,9 @@ wss.on("connection", (ws, req) => {
       const to = Number(msg.to);
       if (!Number.isInteger(to) || to <= 0) return;
       const answer = msg.answer === "accept" ? "accept" : msg.answer === "later" ? "later" : "decline";
+      // 返事も同じ。名前は送らず、画面がDBの表示名で引き直す
       const payload = JSON.stringify({
-        type: "call.answered", from: { id: from.id, name: from.name }, answer,
+        type: "call.answered", from: { id: from.id }, answer,
       });
       for (const t of socketsOf(to)) t.send(payload);
     }

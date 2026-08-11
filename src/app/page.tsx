@@ -58,7 +58,8 @@ const BUBBLE_MAX = 3;
 const MOVE_INTERVAL_MS = 100;
 
 type User = { id: number; displayName: string };
-type Incoming = { id: number; name: string; knewFocus?: boolean };
+// 呼びかけ。名前は持たない。表示のたびにDBの表示名で引く（自己申告の名前を画面に出さない）
+type Incoming = { id: number; knewFocus?: boolean };
 
 // 認証は未実装。利用者は暫定的に固定値で扱う
 function devUser() {
@@ -105,6 +106,9 @@ export default function VillagePage() {
   const [denied, setDenied] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<Incoming | null>(null);
   const [callNotice, setCallNotice] = useState<string | null>(null);
+  const [answered, setAnswered] = useState<{ id: number; text: string } | null>(null);
+  // 集中中の相手に呼びかける前の確認
+  const [confirmCall, setConfirmCall] = useState<number | null>(null);
   // 建物の中の人の見せ方。案2（隠して、乗せたときに人数と名前を出す）を採った。
   // 案1（重ねて描く）は、建物が32ドット四方なのに人物が32ドットあり、
   // 定員4でも建物が完全に隠れ、定員12では人物同士も潰れて誰も読めなくなる（実機で確認）。
@@ -118,7 +122,10 @@ export default function VillagePage() {
   const myStateRef = useRef<Presence["state"]>("idle");
   const talkRef = useRef<TalkStatus>("ok");
   const lastActiveRef = useRef<number>(0);
-  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
+  // 掴んでいる間の情報。moved は「実際に動かしたか」。
+  // 押しただけ（動かさずに離した）ならメニューを出す。これが無いと、
+  // 自分のアバターは押しても必ず移動扱いになり、メニューが一生出ない（実機で確認）
+  const dragRef = useRef<{ dx: number; dy: number; sx: number; sy: number; moved: boolean } | null>(null);
   const lastSentRef = useRef(0);
 
   useEffect(() => { myStateRef.current = myState; }, [myState]);
@@ -201,7 +208,8 @@ export default function VillagePage() {
             // 満員・不正な座標など。押した本人にだけ返る
             setDenied(String(d.reason ?? "移動できませんでした"));
           } else if (d.type === "call.incoming") {
-            setIncoming({ id: Number(d.from?.id), name: String(d.from?.name ?? "だれか"), knewFocus: d.knewFocus });
+            // 名前は受け取らない。IDだけを持ち、表示のときにDBの表示名で引く
+            setIncoming({ id: Number(d.from?.id), knewFocus: d.knewFocus });
           } else if (d.type === "call.sent") {
             setCallNotice("呼びかけました。相手の返事を待っています");
           } else if (d.type === "call.denied") {
@@ -210,7 +218,8 @@ export default function VillagePage() {
             const a = d.answer === "accept" ? "「いま話せます」と返事がありました"
               : d.answer === "later" ? "「あとで」と返事がありました"
                 : "「いまは難しい」と返事がありました";
-            setCallNotice(String(d.from?.name ?? "相手") + " から " + a);
+            // ここも名前はDBの表示名で引く（届いた値をそのまま出さない）
+            setAnswered({ id: Number(d.from?.id), text: a });
           }
         } catch { /* 解釈できない通知は捨てる */ }
       };
@@ -241,6 +250,11 @@ export default function VillagePage() {
     const t = setTimeout(() => setCallNotice(null), 5000);
     return () => clearTimeout(t);
   }, [callNotice]);
+  useEffect(() => {
+    if (!answered) return;
+    const t = setTimeout(() => setAnswered(null), 6000);
+    return () => clearTimeout(t);
+  }, [answered]);
 
   // 自動離席。away にするだけで、idle へは自動で戻さない
   useEffect(() => {
@@ -325,15 +339,22 @@ export default function VillagePage() {
     const person = hitPerson(rooms, people, at.x, at.y);
     if (person && Number(person.id) === me.id) {
       const spot = layout.spots.find((s) => Number(s.p.id) === me.id);
-      dragRef.current = { dx: at.x - (spot?.x ?? at.x), dy: at.y - (spot?.y ?? at.y) };
-      setDrag(clampToVillage(at.x - dragRef.current.dx, at.y - dragRef.current.dy));
-      (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+      dragRef.current = {
+        dx: at.x - (spot?.x ?? at.x), dy: at.y - (spot?.y ?? at.y),
+        sx: at.x, sy: at.y, moved: false,
+      };
+      try { (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId); } catch { /* 捕まえられなくても動く */ }
     }
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const at = toVillage(e);
     if (dragRef.current) {
+      // 手が震えた程度では動かしたことにしない（押しただけの操作を潰さないため）
+      if (Math.abs(at.x - dragRef.current.sx) > 2 || Math.abs(at.y - dragRef.current.sy) > 2) {
+        dragRef.current.moved = true;
+      }
+      if (!dragRef.current.moved) return;
       const to = clampToVillage(at.x - dragRef.current.dx, at.y - dragRef.current.dy);
       setDrag(to);
       // 間引いて送る。毎フレーム送ると1人あたり毎秒60件になる
@@ -353,14 +374,21 @@ export default function VillagePage() {
 
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (dragRef.current) {
-      const at = toVillage(e);
-      const to = clampToVillage(at.x - dragRef.current.dx, at.y - dragRef.current.dy);
-      // 離した位置は必ず送る（間引きで最後の1件が落ちないように）
-      send({ type: "presence.move", x: to.x, y: to.y });
+      const moved = dragRef.current.moved;
+      if (moved) {
+        const at = toVillage(e);
+        const to = clampToVillage(at.x - dragRef.current.dx, at.y - dragRef.current.dy);
+        // 離した位置は必ず送る（間引きで最後の1件が落ちないように）
+        send({ type: "presence.move", x: to.x, y: to.y });
+      }
       dragRef.current = null;
       setDrag(null);
       lastActiveRef.current = Date.now();
       setAutoAway(false);
+      if (moved) return;
+      // 動かしていないなら、押しただけとして自分のメニューを出す
+      const spot = layout.spots.find((s) => Number(s.p.id) === me.id);
+      setPicked({ id: me.id, x: spot?.x ?? 0, y: spot?.y ?? 0 });
       return;
     }
     // 掴んでいなければ、押した扱い
@@ -478,12 +506,20 @@ export default function VillagePage() {
     [people, nameOf],
   );
 
-  // 呼びかけ。集中中の相手には確認を挟む（拒めるのは相手であって、こちらではない）
-  const callTo = (id: number) => {
+  // 呼びかけ。
+  //
+  // 「集中中」の人へは、呼びかけを止めるのではなく確認を挟む形にした。
+  // 止めてしまうと、急ぎの用事のときに別の連絡手段へ逃げることになり、
+  // 「集中中」を出すこと自体が避けられるようになる。
+  // 相手には「集中中と分かったうえで呼びかけている」ことが伝わり、断りやすくしてある。
+  //
+  // 確認はブラウザの confirm を使わない。画面が止まるうえ、村の見た目から浮くため
+  const callTo = (id: number, forced = false) => {
     const target = people.find((p) => Number(p.id) === id);
     const focus = (target?.talk ?? "ok") === "focus";
-    if (focus && !window.confirm(nameOf(id) + " さんは集中中です。それでも呼びかけますか？")) return;
+    if (focus && !forced) { setConfirmCall(id); return; }
     send({ type: "call.invite", to: id, knewFocus: focus });
+    setConfirmCall(null);
     setPicked(null);
   };
 
@@ -738,12 +774,28 @@ export default function VillagePage() {
                     <p>
                       今日やること: {notes[picked.id] ? notes[picked.id] : <span style={{ color: "var(--tk-ink-soft)" }}>未記入</span>}
                     </p>
-                    {pickedPerson && (
+                    {pickedPerson && confirmCall !== picked.id && (
                       <button onClick={() => callTo(picked.id)} className="tk-btn w-full justify-center text-xs">
                         呼びかける
                         {(pickedPerson.talk ?? "ok") === "later" && "（後でならOK）"}
                         {(pickedPerson.talk ?? "ok") === "focus" && "（集中中）"}
                       </button>
+                    )}
+                    {pickedPerson && confirmCall === picked.id && (
+                      <div className="border border-[var(--tk-ink)] p-1.5" style={{ background: "var(--tk-straw)" }}>
+                        <p className="text-[11px] leading-4">
+                          集中中です。急ぎでなければ、あとにしてください。<br />
+                          呼びかけると、集中中と分かったうえで呼んだことが相手に伝わります。
+                        </p>
+                        <div className="mt-1.5 flex gap-1">
+                          <button onClick={() => callTo(picked.id, true)} className="tk-btn flex-1 justify-center text-xs">
+                            それでも呼びかける
+                          </button>
+                          <button onClick={() => setConfirmCall(null)} className="tk-btn tk-btn-quiet flex-1 justify-center text-xs">
+                            やめる
+                          </button>
+                        </div>
+                      </div>
                     )}
                     <p className="text-[10px]" style={{ color: "var(--tk-ink-soft)" }}>他の人の状態は変えられません。</p>
                   </div>
@@ -799,6 +851,11 @@ export default function VillagePage() {
             {callNotice}
           </span>
         )}
+        {answered && (
+          <span className="border border-[var(--tk-ink)] px-2 py-0.5" style={{ background: "var(--tk-paper)" }} role="status">
+            {nameOf(answered.id)} から {answered.text}
+          </span>
+        )}
         <span className="ml-auto">
           <button onClick={() => setShowRoster((v) => !v)} className={"tk-btn " + (showRoster ? "tk-btn-on" : "tk-btn-quiet")}>
             メンバー
@@ -811,7 +868,7 @@ export default function VillagePage() {
       {incoming && (
         <div className="fixed inset-0 z-30 flex items-center justify-center" style={{ background: "rgba(51,48,42,0.45)" }}>
           <div className="tk-panel w-80 p-4">
-            <p className="text-sm font-bold">{incoming.name} さんが呼びかけています</p>
+            <p className="text-sm font-bold">{nameOf(incoming.id)} さんが呼びかけています</p>
             {incoming.knewFocus && (
               <p className="mt-1 text-[11px]" style={{ color: "var(--tk-red)" }}>
                 集中中と分かったうえで呼びかけています

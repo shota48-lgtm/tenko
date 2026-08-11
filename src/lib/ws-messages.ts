@@ -66,15 +66,18 @@ export type PresenceDenied = { type: "presence.denied"; reason: string; roomId?:
 export type CallDenied = { type: "call.denied"; reason: string };
 export type CallSent = { type: "call.sent"; to: number };
 
-/** 呼びかけが届いた。from はサーバーが接続から決めるため、なりすませない */
+/**
+ * 呼びかけが届いた。from はサーバーが接続から決めるため、なりすませない。
+ * 名前は含めない。presence の name は自己申告で騙れるため、画面はDBの表示名で引き直す
+ */
 export type CallIncoming = {
   type: "call.incoming";
-  from: { id: number; name: string };
+  from: { id: number };
   knewFocus?: boolean;
 };
 export type CallAnswered = {
   type: "call.answered";
-  from: { id: number; name: string };
+  from: { id: number };
   answer: "accept" | "later" | "decline";
 };
 

@@ -136,6 +136,18 @@ function stateOf(ws, id) {
   const inc = last(victim, "call.incoming");
   log("  被害者に届いた呼びかけ: " + JSON.stringify(inc ? inc.from : null));
   log("  詐称した名前「社長」になっているか: " + (inc && inc.from.name === "社長" ? "なっている（問題）" : "なっていない"));
+  log("  名前そのものが含まれているか: " + (inc && "name" in inc.from ? "含まれている（問題）" : "含まれていない"));
+
+  // presence.set で名乗る名前を変えても、呼びかけに出ないこと（Phase 4.6 の穴の再発確認）
+  attacker.send(JSON.stringify({ type: "presence.set", user: { id: ATTACKER, name: "社長", colorIndex: 2 }, state: "idle", talk: "ok" }));
+  await wait(300);
+  victim.got.length = 0;
+  await wait(5200);   // 連打制限をまたぐ
+  attacker.send(JSON.stringify({ type: "call.invite", to: VICTIM }));
+  await wait(500);
+  const inc2 = last(victim, "call.incoming");
+  log("  「社長」と名乗り直してから呼びかけた結果: " + JSON.stringify(inc2 ? inc2.from : null));
+  log("  → 画面は利用者IDからDBの表示名を引く。自己申告の名前は届かない");
 
   log("");
   log("=== 5. 呼びかけの連打 ===");
