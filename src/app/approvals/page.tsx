@@ -21,6 +21,10 @@ type Item = {
   matched_text: string | null;
   rule_id: string | null;
   source_deleted: boolean | null;
+  // 修正申請には下書きがない。代わりに理由と、直そうとしている元の記録を見せる
+  correction_reason: string | null;
+  corrects_record_id: number | null;
+  original_event_at: string | null;
 };
 
 const KIND_LABEL: Record<Item["kind"], string> = { arrive: "出社", leave: "退勤", break: "休憩", late: "遅刻" };
@@ -115,13 +119,29 @@ export default function ApprovalsPage() {
                 {new Date(it.event_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
               </span>
             </div>
-            <div className="mt-1 text-xs text-stone-700">
-              根拠の発言: 「{it.source_body ?? "(下書きなし)"}」
-              {it.source_deleted && <span>（この発言は削除されています）</span>}
-            </div>
+            {it.correction_reason ? (
+              // 修正申請には根拠の発言がない。押す判断の材料は「なぜ直すのか」と「元は何だったか」
+              <div className="mt-1 text-xs text-stone-700">
+                修正の申請です。理由: 「{it.correction_reason}」
+                {it.corrects_record_id ? (
+                  <span className="text-stone-500">
+                    　元の記録 #{it.corrects_record_id}
+                    {it.original_event_at &&
+                      `（${new Date(it.original_event_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}）`}
+                  </span>
+                ) : (
+                  <span className="text-stone-500">　（押し忘れの追加。元の記録なし）</span>
+                )}
+              </div>
+            ) : (
+              <div className="mt-1 text-xs text-stone-700">
+                根拠の発言: 「{it.source_body ?? "(下書きなし)"}」
+                {it.source_deleted && <span className="text-stone-500">（この発言は削除されています）</span>}
+              </div>
+            )}
             <div className="text-[11px] text-stone-500">
-              一致した箇所: {it.matched_text ?? "-"} / ルール: {it.rule_id ?? "-"} / 本人の確定:{" "}
-              {new Date(it.confirmed_at).toLocaleString()}
+              {it.rule_id && <>一致した箇所: {it.matched_text} / ルール: {it.rule_id} / </>}
+              本人の確定: {new Date(it.confirmed_at).toLocaleString()}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button onClick={() => act(it.id, "approve")} className="rounded-sm border border-stone-800 bg-stone-800 px-3 py-1 text-xs text-stone-50 hover:bg-stone-700">承認</button>

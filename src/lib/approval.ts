@@ -55,14 +55,19 @@ export async function createRecordFromDraft(draftId: number) {
 // 承認待ちの一覧。根拠の発言を必ず付ける（根拠なしに承認させない）
 export async function listPendingApprovals(actor: Actor) {
   const { rows } = await pool.query(
-    `SELECT r.id, r.user_id, u.display_name, r.kind, r.event_at, r.work_date,
+    `SELECT r.id, r.user_id, u.display_name, r.kind, r.event_at,
+            r.work_date::text AS work_date,
             r.status, r.confirmed_at, r.return_reason,
+            -- 修正申請には下書きがない。代わりに申請の理由と、直そうとしている元の記録を見せる
+            r.correction_reason, r.corrects_record_id,
+            o.event_at AS original_event_at,
             d.source_body, d.matched_text, d.rule_id,
             m.deleted_at IS NOT NULL AS source_deleted
        FROM attendance_records r
        JOIN users u ON u.id = r.user_id
        LEFT JOIN attendance_drafts d ON d.id = r.draft_id
        LEFT JOIN messages m ON m.id = d.message_id
+       LEFT JOIN attendance_records o ON o.id = r.corrects_record_id
       WHERE r.status = 'submitted'
         AND ($1 = 'admin' OR u.manager_id = $2)
       ORDER BY r.work_date DESC, r.event_at DESC
