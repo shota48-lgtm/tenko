@@ -1,6 +1,7 @@
 // 下書きの確定・却下。人間が押したときだけ呼ばれる
 import { NextRequest, NextResponse } from "next/server";
 import { decideDraft } from "@/lib/drafts";
+import { createRecordFromDraft } from "@/lib/approval";
 
 const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1);
 
@@ -22,5 +23,16 @@ export async function POST(req: NextRequest, { params }: Ctx) {
   if (!row) {
     return NextResponse.json({ error: "未確定の下書きが見つかりません（既に確定・却下済みの可能性）" }, { status: 409 });
   }
-  return NextResponse.json({ draft: row });
+
+  // 本人が確定したら、上長の承認を待つ記録を作る。
+  // 確定と承認は別の行為なので、ここではまだ勤怠として確定していない
+  let record = null;
+  if (body.action === "confirm") {
+    try {
+      record = await createRecordFromDraft(draftId);
+    } catch (e) {
+      console.error("[record] 承認待ち記録の作成に失敗: " + String(e));
+    }
+  }
+  return NextResponse.json({ draft: row, record });
 }
