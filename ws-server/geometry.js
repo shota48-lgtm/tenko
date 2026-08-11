@@ -53,21 +53,32 @@ function buildingAt(rooms, x, y) {
   return null;
 }
 
-// 既定の立ち位置。まだ一度も動いていない人を広場に並べる。
-// 移動できるようになったので、あくまで初期値であって、以後はその人の座標が正になる
-function defaultSpot(index) {
+// 既定の立ち位置の候補。
+//
+// 村全体に格子を敷き、広場の中央に近い順に並べる。
+// 広場だけに並べていたところ、27人で置き場所が尽きて重なった（50人の職場を想定して実測）。
+// 移動できるようになったので、これはあくまで初期値であり、以後はその人の座標が正になる。
+const SPOTS = (() => {
   const gapX = PERSON_SIZE + 12;
   const gapY = PERSON_SIZE + 18;
-  const col = index % 8;
-  const row = Math.floor(index / 8) % 3;
-  const wrap = Math.floor(index / 24);
-  return clamp(
-    map.plaza.x * TILE + col * gapX + wrap * 6,
-    map.plaza.y * TILE + row * gapY + wrap * 6,
-  );
+  const cx = (map.plaza.x + map.plaza.w / 2) * TILE;
+  const cy = (map.plaza.y + map.plaza.h / 2) * TILE;
+  const out = [];
+  for (let y = 0; y <= VILLAGE_H - PERSON_SIZE - BOTTOM_MARGIN; y += gapY) {
+    for (let x = 0; x <= VILLAGE_W - PERSON_SIZE; x += gapX) {
+      out.push({ x, y, d: (x - cx) ** 2 + (y - cy) ** 2 });
+    }
+  }
+  out.sort((a, b) => a.d - b.d);
+  return out.map((s) => ({ x: s.x, y: s.y }));
+})();
+
+function defaultSpot(index) {
+  const s = SPOTS[index % SPOTS.length];
+  return clamp(s.x, s.y);
 }
 
 module.exports = {
   map, TILE, VILLAGE_W, VILLAGE_H, PERSON_SIZE, BOTTOM_MARGIN,
-  buildingRects, buildingAt, clamp, isCoord, defaultSpot,
+  buildingRects, buildingAt, clamp, isCoord, defaultSpot, SPOTS,
 };

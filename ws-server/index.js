@@ -111,10 +111,12 @@ function sendList(immediate) {
 }
 
 // 村に入るときの立ち位置。空いているところを探す。
-// 同じ場所に重ねると、下になった人はクリックで選べなくなる（実機で確認）
+//   - 同じ場所に重ねない（下になった人はクリックで選べなくなる。実機で確認）
+//   - 建物の中には置かない（勝手に会議中になり、定員も埋めてしまう）
 function freeSpot() {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < geo.SPOTS.length; i++) {
     const s = geo.defaultSpot(i);
+    if (geo.buildingAt(rooms, s.x, s.y)) continue;
     let taken = false;
     for (const p of presence.values()) {
       if (Math.abs(p.x - s.x) < geo.PERSON_SIZE && Math.abs(p.y - s.y) < geo.PERSON_SIZE) { taken = true; break; }
@@ -123,6 +125,11 @@ function freeSpot() {
   }
   return geo.defaultSpot(presence.size);
 }
+
+// 一度いた場所を覚えておく。
+// 画面を読み直すたびに立ち位置が変わると、隣にいた人と離れてしまう（審査役D）。
+// サーバーが落ちれば消えてよい情報なので、DBには入れない
+const lastSpot = new Map();   // 利用者ID -> { x, y }
 
 // 利用者ID -> その人の接続。呼びかけを特定の相手だけに届けるために使う
 function socketsOf(userId) {
@@ -182,17 +189,31 @@ wss.on("connection", (ws, req) => {
       const prev = presence.get(ws);
       const state = ["idle", "away", "talking", "resting"].indexOf(msg.state) >= 0 ? msg.state : "idle";
       // 位置がまだ無い人にだけ初期値を与える。以後はその人の座標が正
-      const spot = prev ? { x: prev.x, y: prev.y } : freeSpot();
+      const uid = Number(u.id) || 0;
+      // 同じ人が戻ってきたら、前にいた場所に戻す。初めてなら空いている場所を探す
+      const remembered = lastSpot.get(uid);
+      let spot = prev ? { x: prev.x, y: prev.y } : (remembered || freeSpot());
+      // 覚えていた場所が建物の中なら、定員を見てから戻す。
+      // 見ずに戻すと、席が埋まっている部屋へ読み直しだけで入れてしまう
+      let roomId = prev ? prev.roomId : null;
+      if (!prev) {
+        const b = geo.buildingAt(rooms, spot.x, spot.y);
+        if (b) {
+          const rid = Number(b.room.id);
+          if (occupantsOf(rid, uid) < capacityOf(rid)) roomId = rid;
+          else spot = freeSpot();   // 満員になっていたら広場に出す
+        }
+      }
       presence.set(ws, {
-        id: Number(u.id) || 0,
+        id: uid,
         // 名前も他人の画面に出るため、長さを切る。中継しかしないサーバー側でも防ぐ
         name: String(u.name || "名無し").slice(0, 40),
         colorIndex: Number(u.colorIndex) || 1,
-        // 建物の中にいるなら会議中のまま。位置が状態を決める（Phase 4.8）
-        state: prev && prev.roomId != null ? "talking" : state,
+        // 建物の中にいるなら会議中。位置が状態を決める（Phase 4.8）
+        state: roomId != null ? "talking" : state,
         // 建物から出たときに戻す状態。会議中は「位置が決めた状態」なので控えに入れない
         baseState: state === "talking" ? (prev?.baseState ?? "idle") : state,
-        roomId: prev ? prev.roomId : null,
+        roomId,
         x: spot.x, y: spot.y,
         // 話しかけてよいか。決められた3つ以外は受け取らない
         talk: ["ok", "later", "focus"].indexOf(msg.talk) >= 0 ? msg.talk : "ok",
@@ -242,6 +263,7 @@ wss.on("connection", (ws, req) => {
       p.x = at.x;
       p.y = at.y;
       p.updatedAt = Date.now();
+      lastSpot.set(p.id, { x: at.x, y: at.y });
       sendList(false);
 
     } else if (msg.type === "presence.sync") {
