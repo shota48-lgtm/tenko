@@ -204,3 +204,25 @@ CCが決めて進めたものも含む。後から覆せるよう全部挙げる
 ### 7. git log
 
 このログの最後にコミットハッシュを残す。
+
+```
+0a89bc3 fix(sprites): 装飾の並びを3案で揃え、朝の報告を追記
+fae5213 feat(village): 村の描画と在席状態の同期を実装
+930da2f feat(sprites): 村のバリアント3案と比較プレビューを追加
+6b8bcaf feat(sprites): Phase 2 のドット絵18枚をJSONで定義しプレビューを追加
+ef7836d Merge branch 'feature/phase1-chat'
+a5cdd4e chore(scripts): Phase 1 の動作確認スクリプトを追加
+20187d3 feat: Phase 1 の最小画面(投稿・履歴・接続状態・未送信の滞留)
+477c23a feat(ws-server): 通知路に限定し、画面側からの送信を破棄する
+6d3e5ff feat: 投稿の保存APIと差分取得APIを追加
+fd73897 docs: TENKO_STATE.md に Phase 1 スキーマ確定を追記
+50b47ad docs: TENKO_STATE.md を作成
+920e95e chore: tenko の初期化(Next.js 16.3.0 + TypeScript + ws-server 分離)
+```
+
+（このコミット自身のハッシュは含まれない。最新は上記の1行目の1つ後になる）
+
+### 終了時の状態
+- ブランチ: feature/phase2-village。main への切り替え・マージ・push は一切していない
+- 起動していた開発サーバーと ws-server は停止済み
+- DBへの変更: rooms に「会議室」を1行 INSERT（作業6-7 の確認のため）。DDL は実行していない
