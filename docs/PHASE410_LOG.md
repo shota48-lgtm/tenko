@@ -199,4 +199,21 @@ ALTER TABLE rooms DROP COLUMN IF EXISTS deco;
 
 ## 7. コミット
 
-（末尾の「git --no-pager log --oneline」を参照）
+```
+936ecc1 fix: 開いた直後に建物が出ない問題と、印が部屋名で決まる問題を直す
+5160099 docs: 周回5の審査とSTATEの反映
+9e54919 docs: Phase 4.9 の報告書と README の注記を追記
+85ab742 perf(ws): 在席の配信から名前を外す
+f7fa224 fix(village): 吹き出しの配置結果を実際に使い、全員分を出せるようにする
+```
+
+判断記録は開発ルート側に J251〜J254 を追記した（追記前の最大番号は J250 と実測）。
+`docs/TENKO_STATE.md` は Phase 4.5〜4.10 の内容に更新し、冒頭に「いまの姿を1枚で」を足した。
+
+---
+
+## 8. 併せて確認したこと
+
+- `npx tsc --noEmit` は終了コード 0、`npx eslint src` はエラー0（警告1）
+- チャット画面（`/rooms/3`）が部屋名「開発」で開くこと。`page.tsx` を分けた影響が無いこと
+- 部屋の一覧を返す `/api/rooms` は残してある（ws-server が定員の判定に使っているため）
