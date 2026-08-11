@@ -3,7 +3,7 @@ const path = require("path");
 const R = require(process.argv[2] + "/compiled/render.js");
 const fs = require("fs");
 const sheet = JSON.parse(fs.readFileSync("src/sprites/variant-a.json", "utf8"));
-const rooms = [{ id: 1, name: "オフィス" }, { id: 2, name: "会議室" }];
+const rooms = [{ id: 1, name: "オフィス", kind: "room" }, { id: 2, name: "会議室", kind: "hall" }];
 const t0 = Date.now();
 const log = (s) => console.log("+" + ((Date.now() - t0) / 1000).toFixed(2) + "s  " + s);
 

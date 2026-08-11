@@ -13,7 +13,8 @@ export type Presence = {
   state: "idle" | "away" | "talking" | "resting";
   roomId: number | null;
 };
-export type Room = { id: number; name: string };
+// kind は rooms テーブルの列。どの建物で描くかは並び順ではなくこの値だけで決まる
+export type Room = { id: number; name: string; kind: "room" | "hall" };
 export type BuildingRect = { room: Room; x: number; y: number; w: number; h: number };
 
 export const villageMap = mapData;
@@ -107,8 +108,8 @@ export function drawVillage(
 
   // 建物。その部屋で会話中の人がいれば窓を明るくする
   const talkingRooms = new Set(people.filter((p) => p.state === "talking" && p.roomId != null).map((p) => p.roomId));
-  buildingRects(rooms).forEach((r, i) => {
-    const isHall = i % 5 === 4;
+  buildingRects(rooms).forEach((r) => {
+    const isHall = r.room.kind === "hall";
     const lit = talkingRooms.has(r.room.id);
     paint(ctx, s, (isHall ? "hall" : "house") + (lit ? "_lit" : ""), r.x, r.y);
   });

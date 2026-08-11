@@ -20,7 +20,7 @@ function makeCtx(scale){
   return {ctx,buf};
 }
 const rooms=[];
-for(let i=1;i<=8;i++) rooms.push({id:i,name:"部屋"+i});
+for(let i=1;i<=8;i++) rooms.push({id:i,name:"部屋"+i,kind:(i===3||i===6)?"hall":"room"});
 const people=[
   {id:1,name:"a",colorIndex:1,state:"talking",roomId:1},
   {id:2,name:"b",colorIndex:2,state:"talking",roomId:1},
