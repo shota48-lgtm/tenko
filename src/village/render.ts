@@ -9,7 +9,7 @@ import type { SpriteSheet } from "@/sprites";
 
 export type Presence = {
   id: number;
-  name: string;
+  // 名前は presence には無い。DBの表示名を使う（自己申告の名前を他人の画面に出さないため）
   colorIndex: number;
   state: "idle" | "away" | "talking" | "resting";
   roomId: number | null;

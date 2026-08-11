@@ -54,8 +54,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const u = await (await fetch(API + "/api/users")).json();
   const dbName = u.users.find((x) => x.id === victim)?.displayName;
   log("  DBの表示名: " + JSON.stringify(dbName));
-  log("  WSで申告された名前: " + JSON.stringify(after ? after.name : null));
-  log("  → 村の一覧と名前ラベルは DB の表示名を使う（page.tsx の nameOf / roster）");
+  log("  在席の配信に含まれる名前: " + JSON.stringify(after ? after.name : null) + "（undefined なら配られていない）");
+  log("  → Phase 4.9 で名前を配信から外した。騙れる名前が他人の画面に届く経路が構造的に無い");
 
   log("");
   log("=== 3. 許可されていない種別は捨てられるか ===");

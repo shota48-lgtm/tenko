@@ -75,8 +75,12 @@ function presenceList() {
   for (const p of byUser.values()) {
     let connections = 0;
     for (const q of presence.values()) if (q.id === p.id) connections++;
+    // 名前は配らない。
+    //   - 画面はDBの表示名を使うため、そもそも要らない（J239 / 呼びかけの直しと同じ考え方）
+    //   - 配らなければ、自己申告の名前が他人の画面に出る経路が構造的に無くなる
+    //   - 50人が同時に動くと1回8KBを毎秒9回配っていた。名前を外すと軽くなる
     out.push({
-      id: p.id, name: p.name, colorIndex: p.colorIndex,
+      id: p.id, colorIndex: p.colorIndex,
       state: p.state, roomId: p.roomId, talk: p.talk, x: p.x, y: p.y, connections,
     });
   }

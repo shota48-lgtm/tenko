@@ -53,7 +53,7 @@ export type PresenceList = {
   type: "presence.list";
   users: Array<{
     id: number;
-    name: string;
+    // 名前は含めない。画面はDBの表示名で引く（自己申告の名前を他人の画面に出さないため）
     colorIndex: number;
     state: PresenceState;
     roomId: number | null;
