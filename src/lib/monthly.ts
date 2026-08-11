@@ -19,19 +19,25 @@ export async function monthly(userId: number, year: number, month: number): Prom
   // 集計はSQLで行い、取ってきた値をそのまま出す。
   // 出社は最も早い時刻、退勤は最も遅い時刻。存在しない日は行が立たない
   const { rows } = await pool.query(
-    `SELECT work_date::text AS work_date,
-            min(event_at) FILTER (WHERE kind = 'arrive') AS arrive_at,
-            max(event_at) FILTER (WHERE kind = 'leave')  AS leave_at,
-            count(*) FILTER (WHERE kind = 'break')::int  AS break_count,
-            count(*) FILTER (WHERE kind = 'late')::int   AS late_count,
-            count(*) FILTER (WHERE status = 'approved')::int AS approved_count,
-            count(*) FILTER (WHERE status <> 'approved')::int AS unapproved_count
-       FROM attendance_records
-      WHERE user_id = $1
-        AND date_part('year', work_date) = $2
-        AND date_part('month', work_date) = $3
-      GROUP BY work_date
-      ORDER BY work_date`,
+    `SELECT r.work_date::text AS work_date,
+            min(r.event_at) FILTER (WHERE r.kind = 'arrive') AS arrive_at,
+            max(r.event_at) FILTER (WHERE r.kind = 'leave')  AS leave_at,
+            count(*) FILTER (WHERE r.kind = 'break')::int  AS break_count,
+            count(*) FILTER (WHERE r.kind = 'late')::int   AS late_count,
+            count(*) FILTER (WHERE r.status = 'approved')::int AS approved_count,
+            count(*) FILTER (WHERE r.status <> 'approved')::int AS unapproved_count
+       FROM attendance_records r
+      WHERE r.user_id = $1
+        AND date_part('year', r.work_date) = $2
+        AND date_part('month', r.work_date) = $3
+        -- 承認された修正申請に差し替えられた元の記録は数えない（機能5）。
+        -- 元の記録は履歴として残すが、二重に数えると勤務時間が実態と合わなくなる
+        AND NOT EXISTS (
+          SELECT 1 FROM attendance_records c
+           WHERE c.corrects_record_id = r.id AND c.status = 'approved'
+        )
+      GROUP BY r.work_date
+      ORDER BY r.work_date`,
     [userId, year, month],
   );
 
