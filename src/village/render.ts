@@ -236,18 +236,29 @@ export function drawGround(ctx: CanvasRenderingContext2D, s: SpriteSheet, quietD
       paint(ctx, s, (x * 7 + y * 13) % 5 === 0 ? "grass_alt" : "grass", x * TILE, y * TILE);
     }
   }
+  // 道は半タイル（8ドット）ずらして描く。
+  //
+  // 村は 40x26 タイルで偶数のため、村の中心 (320,208) はタイルの境界の上にある。
+  // 道をタイル単位で置くと中心が必ず半タイルずれる（実測: 縦の道の中心が 328 で、8ドット右）。
+  // タイル数を奇数にしても、境界が中心のこの村では中心が合わない（奇数だとタイルの真ん中が中心になる）。
+  // 幅を2タイルにすれば揃うが、道の太さが倍になって見た目が変わる。
+  // そこで幅は変えず、描く位置だけを roadShift ドットずらす。
+  //
+  // 草地は先に全面を塗ってあるので、ずらしても隙間はできない。
+  // 縦の道は x だけ、横の道は y だけずらすため、タイルの繰り返し（もう一方の軸）は崩れない。
+  const shift = m.roadShift ?? 0;
   for (const ry of m.roads.h) {
     for (let x = 0; x < m.width; x++) {
-      paint(ctx, s, "path", x * TILE, ry * TILE);
-      paint(ctx, s, "path_edge_n", x * TILE, (ry - 1) * TILE);
-      paint(ctx, s, "path_edge_s", x * TILE, (ry + 1) * TILE);
+      paint(ctx, s, "path", x * TILE, ry * TILE + shift);
+      paint(ctx, s, "path_edge_n", x * TILE, (ry - 1) * TILE + shift);
+      paint(ctx, s, "path_edge_s", x * TILE, (ry + 1) * TILE + shift);
     }
   }
   for (const rx of m.roads.v) {
     for (let y = 0; y < m.height; y++) {
-      paint(ctx, s, "path", rx * TILE, y * TILE);
-      paint(ctx, s, "path_edge_e", (rx - 1) * TILE, y * TILE);
-      paint(ctx, s, "path_edge_e", (rx + 1) * TILE, y * TILE, true);
+      paint(ctx, s, "path", rx * TILE + shift, y * TILE);
+      paint(ctx, s, "path_edge_e", (rx - 1) * TILE + shift, y * TILE);
+      paint(ctx, s, "path_edge_e", (rx + 1) * TILE + shift, y * TILE, true);
     }
   }
   // 装飾231個は村らしさを作るが、人物が埋もれる（作業4-3）。
