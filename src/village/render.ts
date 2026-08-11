@@ -103,10 +103,14 @@ export function buildingRects(rooms: Room[]): BuildingRect[] {
 
 // 村の端で切れないように、人物を村の中に収める。
 // 自由移動を入れたため、利用者は端まで行ける（Phase 4.8 作業7）
+// 人物の下に出るもの（足元のリングと名前のラベル）の高さ。
+// ws-server/geometry.js の BOTTOM_MARGIN と揃えること
+export const BOTTOM_MARGIN = 18;
+
 export function clampToVillage(x: number, y: number) {
   return {
     x: Math.round(Math.min(Math.max(x, 0), VILLAGE_W - PERSON_SIZE)),
-    y: Math.round(Math.min(Math.max(y, 0), VILLAGE_H - PERSON_SIZE)),
+    y: Math.round(Math.min(Math.max(y, 0), VILLAGE_H - PERSON_SIZE - BOTTOM_MARGIN)),
   };
 }
 

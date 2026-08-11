@@ -109,6 +109,9 @@ body {
 .tk-input:focus { outline: 2px solid var(--tk-straw); outline-offset: -1px; }
 .tk-input::placeholder { color: #a09684; }
 
+/* 補助的な文字。本文より弱く見せる */
+.tk-soft { color: var(--tk-ink-soft); }
+
 /* 区切り線。細い破線でドット調にする */
 .tk-sep { border-bottom: 1px dashed var(--tk-line); }
 

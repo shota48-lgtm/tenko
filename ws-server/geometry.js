@@ -30,11 +30,15 @@ function isCoord(v) {
   return typeof v === "number" && Number.isFinite(v);
 }
 
+// 人物の下に出るもの（足元のリングと名前のラベル）の高さ。
+// これを見込んで下端を止めないと、村の一番下へ動いたときに名前が切れる（Phase 4.8 作業7）
+const BOTTOM_MARGIN = 18;
+
 // 村の中に収める。人物の絵の大きさ分だけ内側に寄せる（端で切れないように）
 function clamp(x, y) {
   return {
     x: Math.round(Math.min(Math.max(x, 0), VILLAGE_W - PERSON_SIZE)),
-    y: Math.round(Math.min(Math.max(y, 0), VILLAGE_H - PERSON_SIZE)),
+    y: Math.round(Math.min(Math.max(y, 0), VILLAGE_H - PERSON_SIZE - BOTTOM_MARGIN)),
   };
 }
 
@@ -64,6 +68,6 @@ function defaultSpot(index) {
 }
 
 module.exports = {
-  map, TILE, VILLAGE_W, VILLAGE_H, PERSON_SIZE,
+  map, TILE, VILLAGE_W, VILLAGE_H, PERSON_SIZE, BOTTOM_MARGIN,
   buildingRects, buildingAt, clamp, isCoord, defaultSpot,
 };

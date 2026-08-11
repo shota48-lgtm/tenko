@@ -48,8 +48,11 @@ const TALK_TAG: Record<TalkStatus, string | null> = {
 // 自動離席までの時間。仮説であり、実運用で調整する前提の値
 const IDLE_MINUTES = Number(process.env.NEXT_PUBLIC_TENKO_IDLE_MINUTES ?? 10);
 const NOTE_MAX = 80;
-// 常時出す吹き出しの上限。20人での実測にもとづく（PHASE48_LOG.md に根拠）
-const BUBBLE_MAX = 5;
+// 常時出す吹き出しの上限。25人を広場に集めて 3 / 5 / 8 件を実測して決めた。
+// 5件以上は吹き出しが横につながって帯に見え、8件では人物の顔にかぶった。
+// 3件でも上の段では触れ合うが、読めなくなるところまでは行かない。
+// 全員分は「乗せた人の吹き出しは必ず出す」ことと、メンバー一覧で補う（PHASE48_LOG.md に根拠）
+const BUBBLE_MAX = 3;
 // 移動中に位置を配る間隔。毎フレーム送ると通信量が過大になるため間引く。
 // サーバー側でも 50ms にまとめて配っている
 const MOVE_INTERVAL_MS = 100;
@@ -269,11 +272,15 @@ export default function VillagePage() {
     return () => clearInterval(t);
   }, [loadNotes]);
 
-  // 建物の中の人を隠す案（案2）では、その人の吹き出しも出さない
-  const bubblePeople = useMemo(
-    () => (occupants === "hide" ? people.filter((p) => p.roomId == null) : people),
-    [people, occupants],
-  );
+  // 建物の中の人を隠す案（案2）では、その人の吹き出しも出さない。
+  // マウスを乗せている人は先頭に回し、上限に関係なく必ず出す
+  // （常時出すのは3件までだが、見たい人のものは必ず読めるようにするため）
+  const bubblePeople = useMemo(() => {
+    const base = occupants === "hide" ? people.filter((p) => p.roomId == null) : people;
+    if (hoverPerson == null) return base;
+    const hit = base.find((p) => Number(p.id) === hoverPerson);
+    return hit ? [hit, ...base.filter((p) => p !== hit)] : base;
+  }, [people, occupants, hoverPerson]);
   const layout = useMemo(
     () => bubbleLayoutFor(rooms, bubblePeople, notes, bubbleMax),
     [rooms, bubblePeople, notes, bubbleMax],

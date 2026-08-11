@@ -88,35 +88,35 @@ export default function ApprovalsPage() {
   };
 
   return (
-    <main className="min-h-screen bg-stone-100 text-stone-800">
-      <header className="border-b border-stone-300 bg-stone-50">
-        <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2">
-          <h1 className="text-base font-semibold tracking-wide">tenko</h1>
-          <span className="text-sm text-stone-600">承認</span>
-          <span className="rounded-sm border border-stone-300 bg-white px-2 py-0.5 text-xs text-stone-600">
+    <main className="min-h-screen" style={{ background: "var(--tk-paper)" }}>
+      <header className="tk-head">
+        <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2">
+          <h1 className="text-sm font-bold tracking-widest">tenko</h1>
+          <span className="text-sm font-bold">承認</span>
+          <span className="tk-panel px-2 py-0.5 text-xs">
             承認待ち {items.length} 件
           </span>
-          <span className="text-xs text-stone-500">承認者: 利用者 {me}</span>
-          <Link href="/" className="ml-auto rounded-sm border border-stone-400 bg-stone-50 px-2.5 py-1 text-xs text-stone-700 hover:bg-stone-200">村へ戻る</Link>
+          <span className="text-xs tk-soft">承認者: 利用者 {me}</span>
+          <Link href="/" className="tk-btn tk-btn-quiet ml-auto text-xs">村へ戻る</Link>
         </div>
       </header>
       <div className="mx-auto max-w-4xl px-4 py-3">
       {error && (
-        <p className="mb-2 rounded-sm border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p>
+        <p className="mb-2 border border-[var(--tk-ink)] px-3 py-2 text-xs font-bold text-white" style={{ background: "var(--tk-red)" }}>{error}</p>
       )}
 
       {items.length === 0 && !error && (
-        <p className="rounded-sm border border-stone-300 bg-white px-3 py-6 text-center text-sm text-stone-500">承認待ちの記録はありません。</p>
+        <p className="tk-panel px-3 py-6 text-center text-sm">承認待ちの記録はありません。</p>
       )}
 
-      <ul className="divide-y divide-stone-200 rounded-sm border border-stone-300 bg-white">
+      <ul className="tk-panel">
         {items.map((it) => (
-          <li key={it.id} className="px-3 py-3">
+          <li key={it.id} className="tk-sep px-3 py-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm font-semibold">{it.display_name}</span>
-              <span className="text-xs text-stone-500">利用者 {it.user_id}</span>
-              <span className="text-xs tabular-nums text-stone-600">{it.work_date}</span>
-              <span className="rounded-sm bg-stone-800 px-1.5 py-0.5 text-[11px] text-stone-50">
+              <span className="text-xs tk-soft">利用者 {it.user_id}</span>
+              <span className="text-xs tabular-nums tk-soft">{it.work_date}</span>
+              <span className="px-1.5 py-0.5 text-[11px] text-white" style={{ background: "var(--tk-wood)" }}>
                 {KIND_LABEL[it.kind]}
               </span>
               <span className="text-sm tabular-nums">
@@ -125,25 +125,25 @@ export default function ApprovalsPage() {
             </div>
             {it.correction_reason ? (
               // 修正申請には根拠の発言がない。押す判断の材料は「なぜ直すのか」と「元は何だったか」
-              <div className="mt-1 text-xs text-stone-700">
+              <div className="mt-1 text-xs">
                 修正の申請です。理由: 「{it.correction_reason}」
                 {it.corrects_record_id ? (
-                  <span className="text-stone-500">
+                  <span className="tk-soft">
                     　元の記録 #{it.corrects_record_id}
                     {it.original_event_at &&
                       `（${new Date(it.original_event_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}）`}
                   </span>
                 ) : (
-                  <span className="text-stone-500">　（押し忘れの追加。元の記録なし）</span>
+                  <span className="tk-soft">　（押し忘れの追加。元の記録なし）</span>
                 )}
               </div>
             ) : (
-              <div className="mt-1 text-xs text-stone-700">
+              <div className="mt-1 text-xs">
                 根拠の発言: 「{it.source_body ?? "(下書きなし)"}」
-                {it.source_deleted && <span className="text-stone-500">（この発言は削除されています）</span>}
+                {it.source_deleted && <span className="tk-soft">（この発言は削除されています）</span>}
               </div>
             )}
-            <div className="text-[11px] text-stone-500">
+            <div className="text-[11px] tk-soft">
               {it.rule_id && <>一致した箇所: {it.matched_text} / ルール: {it.rule_id} / </>}
               本人の確定: {new Date(it.confirmed_at).toLocaleString()}
             </div>
@@ -151,8 +151,7 @@ export default function ApprovalsPage() {
               <button
                 onClick={() => act(it.id, "approve")}
                 disabled={busy === it.id}
-                className="rounded-sm border border-stone-800 bg-stone-800 px-3 py-1 text-xs text-stone-50
-                           hover:bg-stone-700 disabled:opacity-50"
+                className="tk-btn text-xs"
               >
                 {busy === it.id ? "処理中…" : "承認"}
               </button>
@@ -160,15 +159,12 @@ export default function ApprovalsPage() {
                 placeholder="差し戻しの理由"
                 value={reasons[it.id] ?? ""}
                 onChange={(e) => setReasons({ ...reasons, [it.id]: e.target.value })}
-                className="w-64 rounded-sm border border-stone-400 bg-white px-2 py-1 text-xs
-                           placeholder:text-stone-400 focus:border-stone-600 focus:outline-none
-                           focus:ring-2 focus:ring-amber-500/40"
+                className="tk-input w-64 text-xs"
               />
               <button
                 onClick={() => act(it.id, "return")}
                 disabled={busy === it.id}
-                className="rounded-sm border border-stone-400 bg-stone-50 px-3 py-1 text-xs text-stone-700
-                           hover:bg-stone-200 disabled:opacity-50"
+                className="tk-btn tk-btn-quiet text-xs"
               >
                 {busy === it.id ? "処理中…" : "差し戻し"}
               </button>

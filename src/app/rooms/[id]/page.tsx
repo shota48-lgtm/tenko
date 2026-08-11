@@ -51,6 +51,7 @@ export default function Home() {
   const [conn, setConn] = useState<ConnState>("再接続中");
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [input, setInput] = useState("");
+  const [roomName, setRoomName] = useState<string>("");
   const lastIdRef = useRef(0);
   const pendingRef = useRef<Pending[]>([]);
   const sendingRef = useRef(false);
@@ -188,6 +189,14 @@ export default function Home() {
     };
   }, [fetchSince, flushPending, fetchDrafts, roomId]);
 
+  // 部屋の名前。番号だけでは、どの部屋にいるのか分からない
+  useEffect(() => {
+    void fetch("/api/rooms").then((r) => r.json())
+      .then((d: { rooms: { id: number; name: string }[] }) => {
+        setRoomName(d.rooms.find((r) => Number(r.id) === roomId)?.name ?? "");
+      }).catch(() => {});
+  }, [roomId]);
+
   const onSend = () => {
     const body = input.trim();
     if (body.length === 0) return;
@@ -199,69 +208,55 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-stone-100 text-stone-800">
-      <header className="border-b border-stone-300 bg-stone-50">
-        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2">
-          <h1 className="text-base font-semibold tracking-wide">tenko</h1>
-          <span className="text-sm text-stone-600">部屋 {roomId}</span>
-          <span
-            className={
-              "inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-xs " +
-              (conn === "接続中"
-                ? "border-emerald-700/30 bg-emerald-50 text-emerald-800"
-                : "border-amber-700/30 bg-amber-50 text-amber-800")
-            }
-          >
-            <span className={"h-1.5 w-1.5 rounded-full " + (conn === "接続中" ? "bg-emerald-600" : "bg-amber-500")} />
-            <span data-testid="conn">{conn}</span>
-            {pending.length > 0 && <span>（未送信 {pending.length} 件）</span>}
-          </span>
-          <Link href="/" className="ml-auto rounded-sm border border-stone-400 bg-stone-50 px-2.5 py-1 text-xs text-stone-700
-                       hover:bg-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50">村へ戻る</Link>
+    <main className="min-h-screen" style={{ background: "var(--tk-paper)" }}>
+      <header className="tk-head">
+        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2">
+          <h1 className="text-sm font-bold tracking-widest">tenko</h1>
+          <span className="text-sm font-bold">{roomName || "部屋 " + roomId}</span>
+          {/* 正常な接続は既定なので出さない。切断のときだけ出す */}
+          {conn !== "接続中" && (
+            <span
+              className="border border-[var(--tk-ink)] px-2 py-0.5 text-xs font-bold text-white"
+              style={{ background: "var(--tk-red)" }}
+            >
+              <span data-testid="conn">{conn === "切断" ? "切断されました" : "つなぎ直しています"}</span>
+              {pending.length > 0 && <span>（未送信 {pending.length} 件）</span>}
+            </span>
+          )}
+          {conn === "接続中" && <span className="hidden" data-testid="conn">{conn}</span>}
+          <Link href="/" className="tk-btn tk-btn-quiet ml-auto text-xs">村へ戻る</Link>
         </div>
       </header>
 
       <div className="mx-auto max-w-3xl px-4 py-3">
         {drafts.length > 0 && (
-          <section className="mb-3 rounded-sm border border-amber-700/40 bg-amber-50/60">
-            <div className="border-b border-amber-700/20 px-3 py-2">
-              <h2 className="text-sm font-semibold text-amber-900">勤怠の下書き（未確定 {drafts.length} 件）</h2>
-              <p className="mt-0.5 text-xs text-amber-900/80">
+          <section className="tk-panel mb-3">
+            <div className="tk-head px-3 py-2">
+              <h2 className="text-sm font-bold">勤怠の下書き（未確定 {drafts.length} 件）</h2>
+              <p className="mt-0.5 text-xs">
                 発言から自動で立てた下書きです。確定するまで勤怠には記録されません。
               </p>
             </div>
-            <ul className="divide-y divide-amber-700/15">
+            <ul>
               {drafts.map((d) => (
-                <li key={d.id} className="px-3 py-2">
+                <li key={d.id} className="tk-sep px-3 py-2">
                   <div className="flex items-center gap-2">
-                    <span className="rounded-sm bg-amber-800 px-1.5 py-0.5 text-[11px] text-amber-50">
+                    <span className="px-1.5 py-0.5 text-[11px] text-white" style={{ background: "var(--tk-wood)" }}>
                       {KIND_LABEL[d.kind]}
                     </span>
                     <span className="text-sm tabular-nums">
                       {new Date(d.event_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
                     <span className="ml-auto flex gap-2">
-                      <button
-                        onClick={() => decide(d.id, "confirm")}
-                        className="rounded-sm border border-stone-800 bg-stone-800 px-3 py-1 text-xs text-stone-50
-                                   hover:bg-stone-700 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                      >
-                        確定
-                      </button>
-                      <button
-                        onClick={() => decide(d.id, "reject")}
-                        className="rounded-sm border border-stone-400 bg-stone-50 px-3 py-1 text-xs text-stone-700
-                                   hover:bg-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                      >
-                        却下
-                      </button>
+                      <button onClick={() => decide(d.id, "confirm")} className="tk-btn text-xs">確定</button>
+                      <button onClick={() => decide(d.id, "reject")} className="tk-btn tk-btn-quiet text-xs">却下</button>
                     </span>
                   </div>
-                  <p className="mt-1 text-xs text-stone-700">
+                  <p className="mt-1 text-xs">
                     根拠の発言: 「{d.source_body ?? "(本文なし)"}」
-                    {d.source_deleted && <span className="text-stone-500">（この発言は削除されています）</span>}
+                    {d.source_deleted && <span style={{ color: "var(--tk-ink-soft)" }}>（この発言は削除されています）</span>}
                   </p>
-                  <p className="text-[11px] text-stone-500">
+                  <p className="text-[11px]" style={{ color: "var(--tk-ink-soft)" }}>
                     一致した箇所: {d.matched_text} / ルール: {d.rule_id}
                   </p>
                 </li>
@@ -270,49 +265,57 @@ export default function Home() {
           </section>
         )}
 
-        <section className="rounded-sm border border-stone-300 bg-white">
-          <ul className="max-h-[calc(100vh-16rem)] divide-y divide-stone-100 overflow-y-auto">
+        {/* 発言の並び。アイコン・名前・本文・時刻の順に置く。
+            本文は通常のゴシックで、行間を広めに取る（長文が読めなくなる装飾はしない）*/}
+        <section className="tk-panel">
+          <ul className="max-h-[calc(100vh-15rem)] overflow-y-auto">
             {messages.length === 0 && (
-              <li className="px-3 py-6 text-center text-xs text-stone-400">まだ発言がありません</li>
+              <li className="px-3 py-6 text-center text-xs" style={{ color: "var(--tk-ink-soft)" }}>まだ発言がありません</li>
             )}
             {messages.map((m) => (
-              <li key={m.id} className="flex items-baseline gap-2 px-3 py-1.5">
-                <span className="w-10 shrink-0 text-right text-[11px] tabular-nums text-stone-400">#{m.id}</span>
-                <span className="shrink-0 text-xs font-medium text-stone-700">{m.display_name}</span>
-                <span className={"text-sm " + (m.deleted ? "italic text-stone-400" : "")}>
-                  {m.deleted ? "（削除された投稿）" : m.body}
+              <li key={m.id} className="tk-sep flex gap-2.5 px-3 py-2.5">
+                <span className="tk-icon mt-0.5 shrink-0 text-xs font-bold" aria-hidden="true">
+                  {(m.display_name || "?").slice(0, 1)}
                 </span>
-                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-stone-400">
-                  {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xs font-bold">{m.display_name}</span>
+                    <span className="text-[11px] tabular-nums" style={{ color: "var(--tk-ink-soft)" }}>
+                      {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    <span className="ml-auto text-[11px] tabular-nums" style={{ color: "var(--tk-ink-soft)" }}>#{m.id}</span>
+                  </div>
+                  <p
+                    className={"mt-0.5 text-sm leading-6 " + (m.deleted ? "italic" : "")}
+                    style={{ color: m.deleted ? "var(--tk-ink-soft)" : "var(--tk-ink)", wordBreak: "break-word" }}
+                  >
+                    {m.deleted ? "（削除された投稿）" : m.body}
+                  </p>
+                </div>
               </li>
             ))}
             {pending.map((p) => (
-              <li key={p.clientMsgId} className="flex items-baseline gap-2 bg-stone-50 px-3 py-1.5 text-stone-400">
-                <span className="w-10 shrink-0 text-right text-[11px]">—</span>
-                <span className="text-sm">{p.body}</span>
-                <span className="ml-auto shrink-0 text-[11px]">未送信・復帰後に再送</span>
+              <li key={p.clientMsgId} className="tk-sep flex gap-2.5 px-3 py-2.5" style={{ background: "var(--tk-paper-2)" }}>
+                <span className="tk-icon mt-0.5 shrink-0 text-xs" aria-hidden="true">…</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-[11px]" style={{ color: "var(--tk-ink-soft)" }}>未送信・つながったら送ります</span>
+                  </div>
+                  <p className="mt-0.5 text-sm leading-6" style={{ wordBreak: "break-word" }}>{p.body}</p>
+                </div>
               </li>
             ))}
           </ul>
 
-          <div className="flex items-center gap-2 border-t border-stone-200 p-2">
+          <div className="flex items-center gap-2 border-t border-[var(--tk-ink)] p-2">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") onSend(); }}
               placeholder="発言を入力"
-              className="flex-1 rounded-sm border border-stone-400 bg-white px-2 py-1.5 text-sm
-                         placeholder:text-stone-400 focus:border-stone-600 focus:outline-none
-                         focus:ring-2 focus:ring-amber-500/40"
+              className="tk-input flex-1 py-1.5 text-sm"
             />
-            <button
-              onClick={onSend}
-              className="rounded-sm border border-stone-800 bg-stone-800 px-4 py-1.5 text-sm text-stone-50
-                         hover:bg-stone-700 active:bg-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-            >
-              送信
-            </button>
+            <button onClick={onSend} className="tk-btn px-4 py-1.5 text-sm">送信</button>
           </div>
         </section>
       </div>

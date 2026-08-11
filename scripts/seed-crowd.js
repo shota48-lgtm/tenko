@@ -63,7 +63,10 @@ const TALKS = ["ok", "later", "focus"];
   // 先頭4人を定員4の部屋へ、次の12人を定員12の建物へ入れて、両方を満員にする
   // 足元を建物の枠の中央に置く。y+PERSON_SIZE-4 が枠の中に入る必要がある
   const inside = (b, i) => ({ x: b.x + ((i % 3) - 1) * 5, y: b.y - 12 + (i % 2) * 3 });
+  // plaza を付けると誰も建物に入れない（吹き出しの件数を広場で見比べるとき用）
+  const PLAZA_ONLY = process.argv.includes("plaza");
   const target = (i) => {
+    if (PLAZA_ONLY) return null;
     if (i < 4) return inside(house, i);
     if (i < 16) return inside(hall, i);
     return null;
