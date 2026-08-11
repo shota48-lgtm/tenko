@@ -1,9 +1,9 @@
 // 下書きの確定・却下。人間が押したときだけ呼ばれる
 import { NextRequest, NextResponse } from "next/server";
+import { requestedUserId } from "@/lib/actor";
 import { decideDraft } from "@/lib/drafts";
 import { createRecordFromDraft } from "@/lib/approval";
 
-const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1);
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -18,7 +18,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
   if (body.action !== "confirm" && body.action !== "reject") {
     return NextResponse.json({ error: "action は confirm か reject" }, { status: 400 });
   }
-  const userId = Number(body.user ?? CURRENT_USER_ID);
+  const userId = requestedUserId(body.user);
   const row = await decideDraft(draftId, userId, body.action);
   if (!row) {
     return NextResponse.json({ error: "未確定の下書きが見つかりません（既に確定・却下済みの可能性）" }, { status: 409 });

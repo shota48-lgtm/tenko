@@ -1,14 +1,14 @@
 // 月次の勤怠記録。CSV で返す。
 // 自分の記録か、自分が承認できる相手の記録だけを出す（判定は API 側で行う）
 import { NextRequest, NextResponse } from "next/server";
+import { requestedUserId } from "@/lib/actor";
 import { getActor, canApprove } from "@/lib/approval";
 import { monthly, toCsv } from "@/lib/monthly";
 
-const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1);
 
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams;
-  const actorId = Number(q.get("actor") ?? CURRENT_USER_ID);
+  const actorId = requestedUserId(q.get("actor"));
   const targetId = Number(q.get("user") ?? actorId);
   const year = Number(q.get("year"));
   const month = Number(q.get("month"));

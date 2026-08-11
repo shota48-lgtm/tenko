@@ -2,9 +2,9 @@
 //
 // 権限の検証はここで行う。画面を隠すだけでは、このAPIを直接叩かれれば通ってしまう。
 import { NextRequest, NextResponse } from "next/server";
+import { requestedUserId } from "@/lib/actor";
 import { getActor, canApprove, getRecord, approveRecord, returnRecord, resubmitRecord } from "@/lib/approval";
 
-const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1);
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     return NextResponse.json({ error: "action は approve / return / resubmit のいずれか" }, { status: 400 });
   }
 
-  const actor = await getActor(Number(body.user ?? CURRENT_USER_ID));
+  const actor = await getActor(requestedUserId(body.user));
   if (!actor) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
 
   const record = await getRecord(recordId);
