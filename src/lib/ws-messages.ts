@@ -32,7 +32,13 @@ export type PresenceSync = { type: "presence.sync" };
  * 利用者IDを持たないことが重要。動かせるのは「この接続の人」だけで、
  * サーバーは接続に紐づいた人にしか適用しない。よって他人のアバターは動かせない。
  */
-export type PresenceMove = { type: "presence.move"; x: number; y: number };
+export type PresenceMove = {
+  type: "presence.move";
+  x: number;
+  y: number;
+  /** 指を離した1件。これが付いたときだけ、サーバーが人の重なりを避けてずらす */
+  final?: boolean;
+};
 
 /** 呼びかけ。通話は繋がない（次のフェーズ）。from は送らない（サーバーが接続から決める） */
 export type CallInvite = { type: "call.invite"; to: number; knewFocus?: boolean };

@@ -378,8 +378,9 @@ export default function VillagePage() {
       if (moved) {
         const at = toVillage(e);
         const to = clampToVillage(at.x - dragRef.current.dx, at.y - dragRef.current.dy);
-        // 離した位置は必ず送る（間引きで最後の1件が落ちないように）
-        send({ type: "presence.move", x: to.x, y: to.y });
+        // 離した位置は必ず送る（間引きで最後の1件が落ちないように）。
+        // final を付けると、サーバーが人の重なりを避けて少しずらす
+        send({ type: "presence.move", x: to.x, y: to.y, final: true });
       }
       dragRef.current = null;
       setDrag(null);

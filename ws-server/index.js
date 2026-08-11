@@ -126,6 +126,28 @@ function freeSpot() {
   return geo.defaultSpot(presence.size);
 }
 
+// 置いた場所に他の人がいたら、近いところへ少しずらす。
+// 同じ建物に入ろうとしている場合もあるので、建物の判定より前には動かさない
+function nudge(self, at) {
+  const overlaps = (x, y) => {
+    for (const q of presence.values()) {
+      if (q.id === self.id) continue;
+      if (Math.abs(q.x - x) < geo.PERSON_SIZE * 0.7 && Math.abs(q.y - y) < geo.PERSON_SIZE * 0.7) return true;
+    }
+    return false;
+  };
+  if (!overlaps(at.x, at.y)) return at;
+  // 近い順に、8方向へ広げながら空きを探す
+  for (let r = 1; r <= 5; r++) {
+    const step = Math.round(geo.PERSON_SIZE * 0.75) * r;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+      const c = geo.clamp(at.x + dx * step, at.y + dy * step);
+      if (!overlaps(c.x, c.y)) return c;
+    }
+  }
+  return at;   // 見つからなければ、そのまま置く（動かせない方が困る）
+}
+
 // 一度いた場所を覚えておく。
 // 画面を読み直すたびに立ち位置が変わると、隣にいた人と離れてしまう（審査役D）。
 // サーバーが落ちれば消えてよい情報なので、DBには入れない
@@ -260,10 +282,14 @@ wss.on("connection", (ws, req) => {
         // 建物から出たら、入る前の状態に戻す
         if (p.state === "talking") p.state = p.baseState || "idle";
       }
-      p.x = at.x;
-      p.y = at.y;
+      // 離した瞬間だけ、人が重ならないように少しずらす。
+      // 掴んでいる間もずらすと、指の位置と絵が食い違って動かしにくい。
+      // 重なったままにすると、下になった人はクリックで選べなくなる
+      const at2 = msg.final === true ? nudge(p, at) : at;
+      p.x = at2.x;
+      p.y = at2.y;
       p.updatedAt = Date.now();
-      lastSpot.set(p.id, { x: at.x, y: at.y });
+      lastSpot.set(p.id, { x: at2.x, y: at2.y });
       sendList(false);
 
     } else if (msg.type === "presence.sync") {
