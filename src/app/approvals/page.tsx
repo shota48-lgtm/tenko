@@ -7,6 +7,7 @@
 //   - 自動で承認しない。時間経過で承認しない
 //   - ここで一覧やボタンを隠しても権限の担保にはならない。判定はAPI側で行っている
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 
 type Item = {
   id: number;
@@ -96,12 +97,7 @@ export default function ApprovalsPage() {
             承認待ち {items.length} 件
           </span>
           <span className="text-xs text-stone-500">承認者: 利用者 {me}</span>
-          <a
-            href="/village"
-            className="ml-auto rounded-sm border border-stone-400 bg-stone-50 px-2.5 py-1 text-xs text-stone-700 hover:bg-stone-200"
-          >
-            村の画面へ
-          </a>
+          <Link href="/" className="ml-auto rounded-sm border border-stone-400 bg-stone-50 px-2.5 py-1 text-xs text-stone-700 hover:bg-stone-200">村へ戻る</Link>
         </div>
       </header>
       <div className="mx-auto max-w-4xl px-4 py-3">

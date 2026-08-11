@@ -6,6 +6,7 @@
 //
 // ここで一覧やボタンを隠しても権限の担保にはならない。判定はAPI側で行っている。
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 
 type Anomaly = {
   userId: number; displayName: string; workDate: string;
@@ -93,12 +94,12 @@ export default function AttendancePage() {
           <h1 className="text-base font-semibold tracking-wide">tenko</h1>
           <span className="text-sm text-stone-600">勤怠の確認</span>
           <span className="text-xs text-stone-500">利用者 {me}</span>
-          <a
-            href="/village"
+          <Link
+            href="/"
             className="ml-auto rounded-sm border border-stone-400 bg-stone-50 px-2.5 py-1 text-xs text-stone-700 hover:bg-stone-200"
           >
-            村の画面へ
-          </a>
+            村へ戻る
+          </Link>
         </div>
       </header>
       <div className="mx-auto max-w-4xl px-4 py-3">

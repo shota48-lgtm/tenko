@@ -15,6 +15,10 @@ const { WebSocketServer } = require("ws");
 const PORT = Number(process.env.PORT) || 8080;
 const NOTIFY_TOKEN = process.env.WS_NOTIFY_TOKEN || "dev-notify-token";
 
+// 画面（viewer）から受け付ける種別。src/lib/ws-messages.ts の VIEWER_ALLOWED と対応させる。
+// 前方一致で見るので、名前空間ごと許可できる（通話を足すときは "call." を1行足す）
+const VIEWER_ALLOWED = ["presence.set", "presence.sync"];
+
 const wss = new WebSocketServer({ port: PORT });
 const presence = new Map();   // ws -> { id, name, colorIndex, state, roomId }
 
@@ -68,10 +72,13 @@ wss.on("connection", (ws, req) => {
       broadcast(JSON.parse(text));
       return;
     }
-    // 画面側から受け付けるのは在席の申告だけ。投稿は HTTP を通ること
+    // 画面側から受け付ける種別は、この許可リストにあるものだけ。
+    // 一覧は src/lib/ws-messages.ts の VIEWER_ALLOWED と対応させること。
+    // 将来 音声通話のシグナリングを足すときは、ここに "call." を1行加えるだけで済む。
     let msg;
     try { msg = JSON.parse(text); } catch { return; }
-    if (!msg || typeof msg.type !== "string" || msg.type.indexOf("presence.") !== 0) {
+    const allowed = typeof msg?.type === "string" && VIEWER_ALLOWED.some((p) => msg.type === p || msg.type.startsWith(p));
+    if (!allowed) {
       console.log("[drop] viewer からの " + (msg && msg.type) + " を破棄した");
       return;
     }

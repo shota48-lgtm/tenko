@@ -48,6 +48,8 @@ export const BUBBLE = {
   charW: 6,             // 全角1文字あたりの見込み幅（ドット）
   // 人物の頭と吹き出しの距離。離すと別々のものに見えるため詰める（PO指摘）
   tail: 1,
+  // 人物の一辺（ドット）。中心を合わせるために使う
+  personSize: 32,
 };
 
 const widthOf = (ch: string) => {
@@ -117,8 +119,8 @@ export function layoutBubbles(
     const w = Math.round(measure(lines) * cfg.charW) + cfg.padX * 2;
     const h = lines.length * cfg.lineHeight + cfg.padY * 2;
 
-    // 人物の頭の上に出す。人物は 16x16 で、頭は上から2ドットあたり
-    const tailX = it.x + 8;
+    // 人物の頭の上に出す。人物の大きさは呼び出し側から渡される（Phase 4.7 で2倍にした）
+    const tailX = it.x + cfg.personSize / 2;
     const tailY = it.y + 1;
     let x = Math.round(tailX - w / 2);
     const y = tailY - cfg.tail - h;
