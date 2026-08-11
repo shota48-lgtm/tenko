@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
 import { notifyNewMessage } from "@/lib/notify";
+import { createDraftFromMessage } from "@/lib/drafts";
 
 // 認証は Phase 1 の範囲外。利用者は暫定的に固定値で扱う
 const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1);
@@ -108,17 +109,36 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     }
   }
 
-  // ここから先は通知。保存はすでに確定している
+  // ここから先は通知と勤怠の下書き。保存はすでに確定している
   let notified = false;
   let notifyError: string | undefined;
+  let draft: { kind: string; eventAt: string; ruleId: string; created: boolean } | null = null;
   if (isNew) {
     const r = await notifyNewMessage({ type: "message.created", message: row });
     notified = r.delivered;
     notifyError = r.error;
+
+    // 発言から勤怠の下書きを立てる。検出できなければ何もしない。
+    // 下書きの作成に失敗しても投稿の保存は取り消さない（保存は既に確定している）
+    try {
+      const d = await createDraftFromMessage({
+        id: Number(row.id), user_id: Number(row.user_id), body: row.body, created_at: row.created_at,
+      });
+      if (d.detection) {
+        draft = {
+          kind: d.detection.kind,
+          eventAt: d.detection.eventAt.toISOString(),
+          ruleId: d.detection.ruleId,
+          created: d.created,
+        };
+      }
+    } catch (e) {
+      console.error("[draft] 下書きの作成に失敗: " + String(e));
+    }
   }
 
   return NextResponse.json(
-    { duplicate: !isNew, message: row, notified, notifyError },
+    { duplicate: !isNew, message: row, notified, notifyError, draft },
     { status: isNew ? 201 : 200 },
   );
 }

@@ -28,6 +28,19 @@ type Message = {
 
 type Pending = { clientMsgId: string; body: string };
 
+// 勤怠の下書き。確定は必ず人間が押す。時間経過では確定しない
+type Draft = {
+  id: number;
+  kind: "arrive" | "leave" | "break" | "late";
+  event_at: string;
+  status: "pending" | "confirmed" | "rejected";
+  rule_id: string;
+  matched_text: string;
+  source_body: string | null;
+  source_deleted: boolean;
+};
+const KIND_LABEL: Record<Draft["kind"], string> = { arrive: "出社", leave: "退勤", break: "休憩", late: "遅刻" };
+
 type ConnState = "接続中" | "切断" | "再接続中";
 
 export default function Home() {
@@ -35,10 +48,32 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
   const [conn, setConn] = useState<ConnState>("再接続中");
+  const [drafts, setDrafts] = useState<Draft[]>([]);
   const [input, setInput] = useState("");
   const lastIdRef = useRef(0);
   const pendingRef = useRef<Pending[]>([]);
   const sendingRef = useRef(false);
+
+  // 自分の未確定の下書きを取り直す
+  const fetchDrafts = useCallback(async () => {
+    try {
+      const res = await fetch("/api/attendance/drafts?status=pending");
+      if (!res.ok) return;
+      const d = (await res.json()) as { drafts: Draft[] };
+      setDrafts(d.drafts.map((x) => ({ ...x, id: Number(x.id) })));
+    } catch {
+      // 取れなくてもチャットは動く
+    }
+  }, []);
+
+  const decide = useCallback(async (id: number, action: "confirm" | "reject") => {
+    await fetch("/api/attendance/drafts/" + id, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    void fetchDrafts();
+  }, [fetchDrafts]);
 
   const mergeMessages = useCallback((incoming: Message[]) => {
     if (incoming.length === 0) return;
@@ -86,8 +121,10 @@ export default function Home() {
     } finally {
       sendingRef.current = false;
       await fetchSince();
+      // 送信した発言から下書きが立っている可能性があるので取り直す
+      await fetchDrafts();
     }
-  }, [fetchSince, roomId]);
+  }, [fetchSince, fetchDrafts, roomId]);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -138,13 +175,17 @@ export default function Home() {
 
     void fetchSince();
     connect();
+    // 初回の下書き取得。effect の本体から直接呼ぶと setState が同期的に走るため、
+    // 一度キューに逃がしてから呼ぶ（WSが落ちていても下書きは表示したいので onopen には置かない）
+    const firstDrafts = setTimeout(() => { void fetchDrafts(); }, 0);
 
     return () => {
       closed = true;
+      clearTimeout(firstDrafts);
       if (timer) clearTimeout(timer);
       ws?.close();
     };
-  }, [fetchSince, flushPending, roomId]);
+  }, [fetchSince, flushPending, fetchDrafts, roomId]);
 
   const onSend = () => {
     const body = input.trim();
@@ -164,6 +205,32 @@ export default function Home() {
         接続状態: <strong data-testid="conn">{conn}</strong>
         {pending.length > 0 && <span>（未送信 {pending.length} 件）</span>}
       </p>
+
+      {drafts.length > 0 && (
+        <section style={{ border: "1px solid #c9a", padding: 8, margin: "12px 0" }}>
+          <h2 style={{ fontSize: 15, margin: "0 0 6px" }}>勤怠の下書き（未確定 {drafts.length} 件）</h2>
+          <p style={{ fontSize: 12, color: "#555", margin: "0 0 8px" }}>
+            発言から自動で立てた下書きです。確定するまで勤怠には記録されません。
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {drafts.map((d) => (
+              <li key={d.id} style={{ marginBottom: 8 }}>
+                <strong>{KIND_LABEL[d.kind]}</strong>{" "}
+                {new Date(d.event_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                <div style={{ fontSize: 12, color: "#444" }}>
+                  根拠の発言: 「{d.source_body ?? "(本文なし)"}」
+                  {d.source_deleted && <span>（この発言は削除されています）</span>}
+                </div>
+                <div style={{ fontSize: 11, color: "#777" }}>
+                  一致した箇所: {d.matched_text} / ルール: {d.rule_id}
+                </div>
+                <button onClick={() => decide(d.id, "confirm")}>確定</button>{" "}
+                <button onClick={() => decide(d.id, "reject")}>却下</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <ul>
         {messages.map((m) => (
