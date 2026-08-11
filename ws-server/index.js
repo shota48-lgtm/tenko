@@ -62,10 +62,13 @@ wss.on("connection", (ws, req) => {
       if (msg.state === "off") presence.delete(ws);
       else presence.set(ws, {
         id: Number(u.id) || 0,
-        name: String(u.name || "名無し"),
+        // 名前も他人の画面に出るため、長さを切る。中継しかしないサーバー側でも防ぐ
+        name: String(u.name || "名無し").slice(0, 40),
         colorIndex: Number(u.colorIndex) || 1,
         state: ["idle", "away", "talking", "resting"].indexOf(msg.state) >= 0 ? msg.state : "idle",
         roomId: msg.roomId == null ? null : Number(msg.roomId),
+        // 話しかけてよいか（機能3）。決められた3つ以外は受け取らない
+        talk: ["ok", "later", "focus"].indexOf(msg.talk) >= 0 ? msg.talk : "ok",
       });
       sendList();
     } else if (msg.type === "presence.sync") {

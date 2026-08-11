@@ -4,6 +4,7 @@
 //   40x26 タイル + 装飾231個 + 人物 を DOM 要素で持つと 1000 要素を超え、
 //   状態が変わるたびの再描画が重くなる。Canvas なら1枚に描き切れる。
 import mapData from "./map.json";
+import { layoutBubbles, type BubbleInput, type BubbleLayout } from "./bubbles";
 import type { SpriteSheet } from "@/sprites";
 
 export type Presence = {
@@ -12,7 +13,12 @@ export type Presence = {
   colorIndex: number;
   state: "idle" | "away" | "talking" | "resting";
   roomId: number | null;
+  // 話しかけてよいかの軸。在席状態とは独立して持つ（機能3）
+  talk?: TalkStatus;
 };
+export type TalkStatus = "ok" | "later" | "focus";
+// 利用者ID -> 今日やること（機能1）
+export type NoteMap = Record<number, string>;
 // kind は rooms テーブルの列。どの建物で描くかは並び順ではなくこの値だけで決まる
 export type Room = { id: number; name: string; kind: "room" | "hall" };
 export type BuildingRect = { room: Room; x: number; y: number; w: number; h: number };
@@ -120,7 +126,80 @@ export function drawVillage(
   for (const spot of personSpots(rooms, people)) {
     const n = ((spot.p.colorIndex - 1) % 4) + 1;
     paint(ctx, s, "person_" + spot.p.state + "_" + n, Math.round(spot.x), Math.round(spot.y));
+    // 話しかけてよいかは、人物の足元の色付きの点で示す（機能3）。
+    // 状態の組み合わせごとにドット絵を用意すると 4状態×3段階=12枚になるため、印を重ねる方式にした
+    drawTalkMark(ctx, s, spot.p.talk, Math.round(spot.x), Math.round(spot.y));
   }
+}
+
+// 話しかけてよいかの印。ドット絵は増やさず、既存パレットの色で2x2の点を打つ
+const TALK_SLOT: Record<TalkStatus, number> = {
+  ok: 15,     // 服C（緑系）
+  later: 10,  // 明かり（黄系）
+  focus: 13,  // 服A（赤系）
+};
+export function drawTalkMark(
+  ctx: CanvasRenderingContext2D,
+  s: SpriteSheet,
+  talk: TalkStatus | undefined,
+  x: number,
+  y: number,
+) {
+  if (!talk) return;
+  const color = s.palette[TALK_SLOT[talk]];
+  const edge = s.palette[5];
+  if (!color) return;
+  ctx.fillStyle = edge;
+  ctx.fillRect(x + 10, y + 11, 4, 4);
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 11, y + 12, 2, 2);
+}
+
+// 吹き出しを描く（案A: Canvas に描く方式）。
+// 枠はドット絵の画風に合わせて1ドットの縁で描く。文字は Canvas の fillText で載せる
+export function drawBubbles(
+  ctx: CanvasRenderingContext2D,
+  s: SpriteSheet,
+  layout: BubbleLayout,
+) {
+  const fill = s.palette[8];    // 壁の色（明るい面）
+  const edge = s.palette[5];    // 輪郭
+  const text = s.palette[5];
+
+  // 吹き出しを出さない人には、頭上に小さな印だけ出す。
+  // 「書いてある人がいる」ことは分かり、画面は埋まらない
+  for (const m of layout.markOnly) {
+    ctx.fillStyle = edge;
+    ctx.fillRect(m.x + 6, m.y - 4, 5, 4);
+    ctx.fillStyle = fill;
+    ctx.fillRect(m.x + 7, m.y - 3, 3, 2);
+  }
+
+  for (const b of layout.boxes) {
+    ctx.fillStyle = edge;
+    ctx.fillRect(b.x - 1, b.y - 1, b.w + 2, b.h + 2);
+    ctx.fillStyle = fill;
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    // しっぽ
+    ctx.fillStyle = edge;
+    for (let i = 0; i < 3; i++) ctx.fillRect(b.tailX - 1 + i, b.y + b.h + i, 3 - i, 1);
+    ctx.fillStyle = text;
+    ctx.font = "7px sans-serif";
+    ctx.textBaseline = "top";
+    b.lines.forEach((line, i) => ctx.fillText(line, b.x + 3, b.y + 2 + i * 7));
+  }
+}
+
+// 吹き出しの配置を作る。村にいる人のうち、今日やることを書いた人だけが対象
+export function bubbleLayoutFor(rooms: Room[], people: Presence[], notes: NoteMap) {
+  const spots = personSpots(rooms, people);
+  const inputs: BubbleInput[] = [];
+  for (const spot of spots) {
+    const body = notes[spot.p.id];
+    if (!body) continue;
+    inputs.push({ userId: spot.p.id, x: Math.round(spot.x), y: Math.round(spot.y), text: body });
+  }
+  return layoutBubbles(inputs, VILLAGE_W, VILLAGE_H);
 }
 
 export function hitBuilding(rooms: Room[], x: number, y: number): Room | null {
