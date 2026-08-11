@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# tenko
 
-## Getting Started
+チャットと勤怠を繋いだオフィスアプリ。
 
-First, run the development server:
+出勤する場所そのものを仮想オフィス化し、勤怠・現在の状態・チーム内のやり取りを一つの場所で完結させることを目指す。
+チャットでの発言から勤怠の下書きを立て、**確定は必ず人間が押す。** 機械は下書きまでしか作らない。
+
+詳しい方針と経緯は `docs/TENKO_STATE.md` にある。
+
+## 動かし方
 
 ```bash
+# 1) WebSocket サーバー（在席状態と通知を配る。ポート 8080）
+node ws-server/index.js
+
+# 2) アプリ本体（ポート 3000）
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+`.env.local` に `DATABASE_URL`（Neon の接続文字列）が必要。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| 画面 | URL |
+|---|---|
+| 村 | `/village` |
+| チャット | `/?room=1` |
+| 勤怠の確認・修正申請 | `/attendance` |
+| 承認（manager / admin） | `/approvals` |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+`?me=<利用者ID>` で利用者を切り替える（認証が未実装のための暫定）。
+`/village?debug=1` で開発用の切り替えが出る。
 
-## Learn More
+## 設定（環境変数）
 
-To learn more about Next.js, take a look at the following resources:
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `DATABASE_URL` | なし | Neon の接続文字列 |
+| `TENKO_TZ` | `Asia/Tokyo` | 業務上の1日の境界を決めるタイムゾーン |
+| `TENKO_WORK_START` | `09:00` | 始業時刻。遅刻の相対表現の基準 |
+| `TENKO_LONG_WORK_HOURS` | `12` | 勤務が長いと判定する時間 |
+| `TENKO_ANOMALY_DAYS` | `31` | 勤怠異常を探す期間 |
+| `TENKO_TRUST_USER_PARAM` | `1` | リクエストの `user` を信用するか。**公開時は `0`** |
+| `NEXT_PUBLIC_TENKO_IDLE_MINUTES` | `10` | 自動離席までの時間 |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 現時点で対応していないこと
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+隠さずに書く。実運用の前に判断が要る。
 
-## Deploy on Vercel
+### 深夜0時をまたぐ勤務
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+**未対応。** 勤怠の記録は、発生時刻の日本時間の日付でその日に入る。
+出社が 8/12 23:00、退勤が 8/13 02:00 の場合、**別々の日の記録になる。**
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+夜勤のある職場では正しくない。直すには「勤務日」という概念（出社から退勤までを1つの勤務として束ねる）を
+導入する必要があり、勤怠の記録・月次の集計・承認のすべてに影響する。
+影響が広いため、現時点では未対応のままにしている。
+
+### 認証
+
+**未実装。** 利用者IDをリクエストのパラメータから受け取っているため、
+`TENKO_TRUST_USER_PARAM=1` のままでは誰でも他人になりすませる。
+公開する場合は `0` にすること（その場合、利用者はサーバー側の固定値になる）。
+
+WebSocket サーバーには認証の口がない。接続してきた相手の申告をそのまま信じる。
+
+### その他
+
+- 自動離席の閾値（10分）は仮説であり、実運用での裏付けがない
+- 村の吹き出しは常時3件まで。全員分は右の一覧で見る
+- 休憩は「回数」だけを数える。復帰を検出していないため、休憩時間は出せない
