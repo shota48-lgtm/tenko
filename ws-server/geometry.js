@@ -42,15 +42,34 @@ function clamp(x, y) {
   };
 }
 
-// その座標がどの建物の中か。人物の足元（絵の中央下）で判定する。
-// 頭で判定すると、建物の下に立っただけで中に入ってしまう
+// 建物の判定に足す余白。見た目の枠より広く取る。
+//
+// Phase 4.8 では人物の「足元の1点」が枠に入るかで判定していた。
+// この形だと、人物を建物に重ねて置いたとき、下向きの許容が3ドットしかなく、
+// POが4回試して0回しか入れなかった。
+// 中心どうしで判定し、さらに余白を足すことで、狙いが多少ずれても入るようにする。
+//
+// 余白の上限: 建物の間隔は最短で32ドット（例: (2,2) と (6,2)）。
+// 12 なら判定の幅は 32+24=56 となり、隣の建物の判定と重ならない
+const ENTER_MARGIN = 12;
+
+// その座標がどの建物か。人物の中心で見る。
+// 中心にしたのは、利用者の操作が「建物の上に人を置く」であり、
+// そのとき合っているのは足元ではなく中心だから
 function buildingAt(rooms, x, y) {
-  const fx = x + PERSON_SIZE / 2;
-  const fy = y + PERSON_SIZE - 4;
+  const cx = x + PERSON_SIZE / 2;
+  const cy = y + PERSON_SIZE / 2;
+  let best = null;
+  let bestD = Infinity;
   for (const r of buildingRects(rooms)) {
-    if (fx >= r.x && fx < r.x + r.w && fy >= r.y && fy < r.y + r.h) return r;
+    const m = ENTER_MARGIN;
+    if (cx >= r.x - m && cx < r.x + r.w + m && cy >= r.y - m && cy < r.y + r.h + m) {
+      // 余白どうしが触れる配置でも、近い方の建物に入れる
+      const d = (cx - (r.x + r.w / 2)) ** 2 + (cy - (r.y + r.h / 2)) ** 2;
+      if (d < bestD) { bestD = d; best = r; }
+    }
   }
-  return null;
+  return best;
 }
 
 // 既定の立ち位置の候補。
@@ -80,5 +99,5 @@ function defaultSpot(index) {
 
 module.exports = {
   map, TILE, VILLAGE_W, VILLAGE_H, PERSON_SIZE, BOTTOM_MARGIN,
-  buildingRects, buildingAt, clamp, isCoord, defaultSpot, SPOTS,
+  buildingRects, buildingAt, clamp, isCoord, defaultSpot, SPOTS, ENTER_MARGIN,
 };

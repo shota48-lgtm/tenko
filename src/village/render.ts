@@ -93,6 +93,78 @@ export function drawStateRing(
   ctx.restore();
 }
 
+// 部屋ごとの印。7棟が同じ絵なので、色と形で性格を分ける。
+// 新しい32x32のスプライトは作らない。建物の絵はそのままに、屋根の下へ小さな看板を描く。
+// 色はパレット16色から採る（色数を増やさない）
+const ROOM_MARKS: { key: string; color: number; shape: "square" | "triangle" | "cross" | "circle" | "bar" }[] = [
+  { key: "開発", color: 14, shape: "square" },    // 青
+  { key: "営業", color: 13, shape: "triangle" },  // 赤
+  { key: "休憩", color: 15, shape: "circle" },    // 緑
+  { key: "会議", color: 12, shape: "bar" },       // 紫
+  { key: "サポート", color: 6, shape: "cross" },  // 藁色
+  { key: "オフィス", color: 9, shape: "square" }, // 木
+  { key: "広間", color: 10, shape: "circle" },    // 明るい藁
+];
+// 部屋名から印を決める。名前で決めるので、DBに列を足さずに済む。
+// 当てはまらない部屋は、IDで順に割り当てる（同じ部屋には必ず同じ印が付く）
+export function markFor(room: Room) {
+  const hit = ROOM_MARKS.find((m) => room.name.includes(m.key));
+  return hit ?? ROOM_MARKS[Number(room.id) % ROOM_MARKS.length];
+}
+
+function drawRoomMark(ctx: CanvasRenderingContext2D, s: SpriteSheet, r: BuildingRect) {
+  const m = markFor(r.room);
+  const color = s.palette[m.color] ?? "#333";
+  const x = r.x + 24;
+  const y = r.y + 3;
+  ctx.save();
+  ctx.fillStyle = "#33302a";
+  ctx.fillRect(x - 1, y - 1, 7, 7);   // 枠。地面と同化しないように敷く
+  ctx.fillStyle = color;
+  if (m.shape === "square") ctx.fillRect(x, y, 5, 5);
+  else if (m.shape === "bar") ctx.fillRect(x, y + 1, 5, 3);
+  else if (m.shape === "circle") { ctx.fillRect(x + 1, y, 3, 5); ctx.fillRect(x, y + 1, 5, 3); }
+  else if (m.shape === "cross") { ctx.fillRect(x + 2, y, 1, 5); ctx.fillRect(x, y + 2, 5, 1); }
+  else if (m.shape === "triangle") {
+    ctx.fillRect(x + 2, y, 1, 1); ctx.fillRect(x + 1, y + 1, 3, 1);
+    ctx.fillRect(x, y + 2, 5, 1); ctx.fillRect(x, y + 3, 5, 1);
+  }
+  ctx.restore();
+}
+
+// 何人入っているかの帯。建物の下に敷く。
+// 0人（空の枠だけ）・途中（緑が伸びる）・満員（赤で埋まる）が離れて見ても区別できる
+function drawSeatBar(ctx: CanvasRenderingContext2D, r: BuildingRect, used: number, cap: number) {
+  if (cap <= 0) return;
+  const w = r.w - 2;
+  const x = r.x + 1;
+  const y = r.y + r.h + 1;
+  ctx.save();
+  ctx.fillStyle = "#33302a";
+  ctx.fillRect(x - 1, y - 1, w + 2, 5);
+  ctx.fillStyle = "#e8c9a0";
+  ctx.fillRect(x, y, w, 3);
+  if (used > 0) {
+    ctx.fillStyle = used >= cap ? "#b2503a" : "#5f7f45";
+    ctx.fillRect(x, y, Math.max(2, Math.round((w * Math.min(used, cap)) / cap)), 3);
+  }
+  ctx.restore();
+}
+
+// 未読の投稿がある建物の印。会話中の窓の光とは別に、屋根の上へ黄色い旗を立てる。
+// 光り方を変えるだけだと「誰かいる」との区別が付かない
+function drawUnreadFlag(ctx: CanvasRenderingContext2D, r: BuildingRect) {
+  const x = r.x + 3;
+  const y = r.y - 8;
+  ctx.save();
+  ctx.fillStyle = "#33302a";
+  ctx.fillRect(x, y, 1, 9);
+  ctx.fillRect(x + 1, y, 7, 6);
+  ctx.fillStyle = "#f2d489";
+  ctx.fillRect(x + 1, y + 1, 6, 4);
+  ctx.restore();
+}
+
 // 建物の位置。部屋の行数に応じて枠を使う（部屋が増えれば建物が増える）
 export function buildingRects(rooms: Room[]): BuildingRect[] {
   return rooms.slice(0, villageMap.buildingSlots.length).map((room, i) => {
@@ -180,27 +252,45 @@ export function drawVillage(
   withGround = true,
   counts: RoomCounts = {},
   occupants: OccupantsMode = "show",
+  highlight: number | null = null,
+  unread: Record<number, number> = {},
+  // 自分だけは、建物の中にいても必ず描く。
+  // 描かないと掴めず、建物から出られなくなる（実機で確認）
+  meId: number | null = null,
 ) {
   ctx.imageSmoothingEnabled = false;
   const m = villageMap;
   if (withGround) drawGround(ctx, s);
 
-  // 建物。誰か入っていれば窓を明るくする
+  // 建物。誰か入っていれば窓を明るくし、下に人数の帯を出す
   buildingRects(rooms).forEach((r) => {
     const isHall = r.room.kind === "hall";
     const c = counts[r.room.id];
     const used = c?.used ?? 0;
     const cap = c?.capacity ?? r.room.capacity ?? 0;
+    const full = cap > 0 && used >= cap;
     paint(ctx, s, (isHall ? "hall" : "house") + (used > 0 ? "_lit" : ""), r.x, r.y);
-    if (cap > 0 && used >= cap) {
-      // 満員は枠で示す。窓の明るさは「誰かいる」と区別がつかないため、形を変える
+    // 部屋の性格を色で分ける。7棟が同じ見た目では、どれがどの部屋か分からない
+    drawRoomMark(ctx, s, r);
+    // 何人いるかを常時出す。0人・途中・満員が離れて見ても区別できるようにする
+    drawSeatBar(ctx, r, used, cap);
+    if (full) {
+      // 満員は枠でも示す。人数の帯だけでは、遠目に埋まり具合が読み取りにくい
       ctx.save();
-      ctx.strokeStyle = "#8c2f2f";
+      ctx.strokeStyle = "#b2503a";
       ctx.lineWidth = 2;
       ctx.strokeRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
-      ctx.setLineDash([3, 2]);
-      ctx.strokeStyle = "#e0c56a";
-      ctx.strokeRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+      ctx.restore();
+    }
+    if (unread[r.room.id] > 0) drawUnreadFlag(ctx, r);
+    // ドラッグ中に、いま離したら入る建物を光らせる
+    if (highlight === r.room.id) {
+      ctx.save();
+      ctx.strokeStyle = full ? "#b2503a" : "#f2d489";
+      ctx.lineWidth = 2;
+      ctx.setLineDash(full ? [3, 3] : []);
+      const m = ENTER_MARGIN;
+      ctx.strokeRect(r.x - m, r.y - m, r.w + m * 2, r.h + m * 2);
       ctx.restore();
     }
   });
@@ -209,7 +299,7 @@ export function drawVillage(
 
   // 退勤した人は描画しない（presence に載っていない人は描かれない）
   for (const spot of personSpots(rooms, people)) {
-    if (occupants === "hide" && spot.p.roomId != null) continue;
+    if (occupants === "hide" && spot.p.roomId != null && Number(spot.p.id) !== meId) continue;
     const n = ((spot.p.colorIndex - 1) % 4) + 1;
     const x = Math.round(spot.x);
     const y = Math.round(spot.y);
@@ -281,4 +371,25 @@ export function hitBuilding(rooms: Room[], x: number, y: number): Room | null {
     if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r.room;
   }
   return null;
+}
+
+// 建物の判定に足す余白。ws-server/geometry.js の ENTER_MARGIN と揃えること
+export const ENTER_MARGIN = 12;
+
+// その位置に人物を置いたら、どの建物に入るか。
+// 判定するのはサーバーだが、ドラッグ中に「どこへ入るか」を見せるために画面側でも同じ計算をする。
+// 片方だけ変えると、光った建物に入れないという食い違いが起きる
+export function buildingForAvatar(rooms: Room[], x: number, y: number): BuildingRect | null {
+  const cx = x + PERSON_SIZE / 2;
+  const cy = y + PERSON_SIZE / 2;
+  let best: BuildingRect | null = null;
+  let bestD = Infinity;
+  for (const r of buildingRects(rooms)) {
+    const m = ENTER_MARGIN;
+    if (cx >= r.x - m && cx < r.x + r.w + m && cy >= r.y - m && cy < r.y + r.h + m) {
+      const d = (cx - (r.x + r.w / 2)) ** 2 + (cy - (r.y + r.h / 2)) ** 2;
+      if (d < bestD) { bestD = d; best = r; }
+    }
+  }
+  return best;
 }

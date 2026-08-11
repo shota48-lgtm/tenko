@@ -20,13 +20,19 @@ import Link from "next/link";
 import { ACTIVE_VARIANT, VARIANTS, sheet } from "@/sprites";
 import {
   drawVillage, drawGround, drawNoteMarks, bubbleLayoutFor, hitBuilding, hitPerson,
-  buildingRects, clampToVillage,
+  buildingRects, clampToVillage, buildingForAvatar, ENTER_MARGIN,
   VILLAGE_W, VILLAGE_H, PERSON_SIZE,
   type Presence, type Room, type NoteMap, type TalkStatus, type RoomCounts, type OccupantsMode,
 } from "@/village/render";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
-const SCALE = 2;
+// 村の拡大率。
+//
+// 2倍で固定していたところ、村（640x416）が 1280x832 になり、画面に収まらず縦にスクロールした。
+// 全員がどこにいるか一目で分かることが村の唯一の価値なので、既定は「全体が入る」にする。
+// 整数倍でないと1ドットの大きさが揃わないが、収まらないよりは良い（PHASE49_LOG.md に記載）。
+const ZOOM_CLOSE = 2;
+const ZOOM_MIN = 1.2;
 // 選べる状態。「会議中(talking)」は入っていない。建物に入れば自動でそうなるため（Phase 4.8）
 const STATES: Presence["state"][] = ["idle", "away", "resting"];
 const STATE_LABEL: Record<Presence["state"], string> = {
@@ -48,6 +54,8 @@ const TALK_TAG: Record<TalkStatus, string | null> = {
 // 自動離席までの時間。仮説であり、実運用で調整する前提の値
 const IDLE_MINUTES = Number(process.env.NEXT_PUBLIC_TENKO_IDLE_MINUTES ?? 10);
 const NOTE_MAX = 80;
+// 勤怠の下書きの種別。Phase 3 で決めた4つ
+const DRAFT_KIND: Record<string, string> = { arrive: "出社", leave: "退勤", break: "休憩", late: "遅刻" };
 // 常時出す吹き出しの上限。25人を広場に集めて 3 / 5 / 8 件を実測して決めた。
 // 5件以上は吹き出しが横につながって帯に見え、8件では人物の顔にかぶった。
 // 3件でも上の段では触れ合うが、読めなくなるところまでは行かない。
@@ -104,11 +112,23 @@ export default function VillagePage() {
   const [hoverRoom, setHoverRoom] = useState<number | null>(null);
   const [hoverPerson, setHoverPerson] = useState<number | null>(null);
   const [denied, setDenied] = useState<string | null>(null);
+  // 断りではない知らせ（部屋に入った・広場に出た）。赤くしない
+  const [notice, setNotice] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<Incoming | null>(null);
   const [callNotice, setCallNotice] = useState<string | null>(null);
   const [answered, setAnswered] = useState<{ id: number; text: string } | null>(null);
   // 集中中の相手に呼びかける前の確認
   const [confirmCall, setConfirmCall] = useState<number | null>(null);
+  // 村の拡大率。"fit" は画面に全体が入る大きさ、"close" は2倍（スクロールする）
+  const [zoom, setZoom] = useState<"fit" | "close">("fit");
+  const [fitScale, setFitScale] = useState(ZOOM_CLOSE);
+  // ドラッグ中に、いま入る建物
+  const [dropTarget, setDropTarget] = useState<number | null>(null);
+  // 部屋ごとの未読件数と、自分の未確定の勤怠の下書き。
+  // tenko の主張は「チャットが勤怠になる」なので、村にその両方が出ている必要がある
+  const [unread, setUnread] = useState<Record<number, number>>({});
+  const [drafts, setDrafts] = useState<{ id: number; kind: string; eventAt: string; matchedText: string }[]>([]);
+  const [showDrafts, setShowDrafts] = useState(false);
   // 建物の中の人の見せ方。案2（隠して、乗せたときに人数と名前を出す）を採った。
   // 案1（重ねて描く）は、建物が32ドット四方なのに人物が32ドットあり、
   // 定員4でも建物が完全に隠れ、定員12では人物同士も潰れて誰も読めなくなる（実機で確認）。
@@ -143,6 +163,17 @@ export default function VillagePage() {
     return send({ type: "presence.set", user: userRef.current, state, roomId: null, talk: talkStatus });
   }, [send]);
 
+  // 未読と勤怠の下書き。村に出すために定期的に取り直す
+  const loadVillage = useCallback(async (uid: number) => {
+    try {
+      const res = await fetch("/api/village?user=" + uid);
+      if (!res.ok) return;
+      const d = await res.json();
+      setUnread(d.unread ?? {});
+      setDrafts(d.drafts ?? []);
+    } catch { /* 取れなくても村は描く */ }
+  }, []);
+
   const loadNotes = useCallback(async () => {
     try {
       const res = await fetch("/api/notes");
@@ -174,9 +205,10 @@ export default function VillagePage() {
         .then((d) => setNoteInput(d.note?.body ?? "")).catch(() => {});
       void fetch("/api/me?user=" + u.id).then((r) => r.json())
         .then((d) => setMyRole(d.me?.role ?? null)).catch(() => {});
+      void loadVillage(u.id);
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes, router]);
+  }, [loadNotes, loadVillage, router]);
 
   // WebSocket。在席・位置・呼びかけを配る
   useEffect(() => {
@@ -246,6 +278,11 @@ export default function VillagePage() {
     return () => clearTimeout(t);
   }, [denied]);
   useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 2500);
+    return () => clearTimeout(t);
+  }, [notice]);
+  useEffect(() => {
     if (!callNotice) return;
     const t = setTimeout(() => setCallNotice(null), 5000);
     return () => clearTimeout(t);
@@ -282,19 +319,37 @@ export default function VillagePage() {
   }, [announce]);
 
   useEffect(() => {
-    const t = setInterval(() => { void loadNotes(); }, 30_000);
+    const t = setInterval(() => { void loadNotes(); void loadVillage(userRef.current.id); }, 30_000);
     return () => clearInterval(t);
-  }, [loadNotes]);
+  }, [loadNotes, loadVillage]);
+
+  // 画面に村全体が入る拡大率を測る。窓の大きさが変わるたびに測り直す
+  useEffect(() => {
+    const measure = () => {
+      // ヘッダ・下部の帯・余白の分を引く。
+      // 見積もりが12ドット甘く、2倍でちょうど1ドットはみ出してスクロールしていた（実測）
+      const w = window.innerWidth - 40;
+      const h = window.innerHeight - 120;
+      const s = Math.min(w / VILLAGE_W, h / VILLAGE_H, ZOOM_CLOSE);
+      setFitScale(Math.max(ZOOM_MIN, Math.floor(s * 20) / 20));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  const SCALE = zoom === "close" ? ZOOM_CLOSE : fitScale;
 
   // 建物の中の人を隠す案（案2）では、その人の吹き出しも出さない。
   // マウスを乗せている人は先頭に回し、上限に関係なく必ず出す
   // （常時出すのは3件までだが、見たい人のものは必ず読めるようにするため）
   const bubblePeople = useMemo(() => {
-    const base = occupants === "hide" ? people.filter((p) => p.roomId == null) : people;
+    const base = occupants === "hide"
+      ? people.filter((p) => p.roomId == null || Number(p.id) === me.id)
+      : people;
     if (hoverPerson == null) return base;
     const hit = base.find((p) => Number(p.id) === hoverPerson);
     return hit ? [hit, ...base.filter((p) => p !== hit)] : base;
-  }, [people, occupants, hoverPerson]);
+  }, [people, occupants, hoverPerson, me.id]);
   const layout = useMemo(
     () => bubbleLayoutFor(rooms, bubblePeople, notes, bubbleMax),
     [rooms, bubblePeople, notes, bubbleMax],
@@ -320,9 +375,9 @@ export default function VillagePage() {
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, VILLAGE_W, VILLAGE_H);
     if (ground) ctx.drawImage(ground, 0, 0);
-    drawVillage(ctx, sheet(variant), rooms, people, !ground, counts, occupants);
+    drawVillage(ctx, sheet(variant), rooms, people, !ground, counts, occupants, dropTarget, unread, me.id);
     drawNoteMarks(ctx, sheet(variant), layout);
-  }, [rooms, people, variant, layout, ground, counts, occupants]);
+  }, [rooms, people, variant, layout, ground, counts, occupants, dropTarget, unread, me.id]);
 
   // ---- 移動（作業1）----
   //
@@ -357,6 +412,10 @@ export default function VillagePage() {
       if (!dragRef.current.moved) return;
       const to = clampToVillage(at.x - dragRef.current.dx, at.y - dragRef.current.dy);
       setDrag(to);
+      // いま離したらどの建物に入るかを見せる。
+      // 落としてみるまで狙いが合っているか分からない状態を作らない
+      const target = buildingForAvatar(rooms, to.x, to.y);
+      setDropTarget(target ? target.room.id : null);
       // 間引いて送る。毎フレーム送ると1人あたり毎秒60件になる
       const now = Date.now();
       if (now - lastSentRef.current >= MOVE_INTERVAL_MS) {
@@ -381,9 +440,24 @@ export default function VillagePage() {
         // 離した位置は必ず送る（間引きで最後の1件が落ちないように）。
         // final を付けると、サーバーが人の重なりを避けて少しずらす
         send({ type: "presence.move", x: to.x, y: to.y, final: true });
+        // 落とした結果を言葉でも出す。黙って広場に置かれると、
+        // 建物に入ろうとして外したのか、そもそも入れないのかが分からない
+        const target = buildingForAvatar(rooms, to.x, to.y);
+        const wasIn = people.find((p) => Number(p.id) === me.id)?.roomId ?? null;
+        if (target) {
+          const c = counts[target.room.id];
+          if (c && c.used >= c.capacity && Number(wasIn) !== target.room.id) {
+            setDenied("「" + target.room.name + "」は満員です（" + c.used + "/" + c.capacity + "）");
+          } else {
+            setNotice("「" + target.room.name + "」に入りました");
+          }
+        } else if (wasIn != null) {
+          setNotice("広場に出ました");
+        }
       }
       dragRef.current = null;
       setDrag(null);
+      setDropTarget(null);
       lastActiveRef.current = Date.now();
       setAutoAway(false);
       if (moved) return;
@@ -416,6 +490,18 @@ export default function VillagePage() {
     setTalk(t);
     announce(myStateRef.current, t);
   }, [announce]);
+
+  // 建物から出る。広場の空いているところへ移す（サーバーが重なりを避けてくれる）
+  const leaveBuilding = useCallback(() => {
+    const b = buildingRects(rooms).find((r) => r.room.id === Number(
+      people.find((p) => Number(p.id) === me.id)?.roomId,
+    ));
+    if (!b) return;
+    const to = clampToVillage(b.x, b.y + PERSON_SIZE + ENTER_MARGIN + 6);
+    send({ type: "presence.move", x: to.x, y: to.y, final: true });
+    setPicked(null);
+    setNotice("広場に出ました");
+  }, [rooms, people, me.id, send]);
 
   const leaveVillage = useCallback(() => {
     send({ type: "presence.set", user: userRef.current, state: "off" });
@@ -478,8 +564,9 @@ export default function VillagePage() {
 
   // 村に置く名前と話しかけ可否のラベル。人物の座標に合わせて重ねる
   const tags = useMemo(() => {
+    // 自分は建物の中にいても名前を出す。掴む手がかりになるため
     const shown = occupants === "hide"
-      ? layout.spots.filter((s) => s.p.roomId == null)
+      ? layout.spots.filter((s) => s.p.roomId == null || Number(s.p.id) === me.id)
       : layout.spots;
     return shown.map((s) => ({
       id: Number(s.p.id),
@@ -491,6 +578,19 @@ export default function VillagePage() {
       isMe: Number(s.p.id) === me.id,
     }));
   }, [layout.spots, nameOf, me.id, occupants]);
+
+  // 自分の立ち位置。頭上に出すもの（勤怠の印）の座標に使う
+  const myTag = tags.find((t) => t.isMe) ?? null;
+  // 村にいる人数。「メンバー」を押す動機を出すために添える
+  const inVillage = roster.filter((r) => r.state !== "off").length;
+
+  const decideDraft = async (id: number, action: "confirm" | "reject") => {
+    await fetch("/api/attendance/drafts/" + id, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, user: me.id }),
+    });
+    await loadVillage(me.id);
+  };
 
   const pickedPerson = picked ? people.find((p) => Number(p.id) === picked.id) : undefined;
   const pickedIsMe = picked?.id === me.id;
@@ -558,7 +658,9 @@ export default function VillagePage() {
 
       {/* 一覧を畳んでいるときは村を中央に置く。左に寄せると右が大きく空く（審査役B）*/}
       <div className={"flex items-start gap-3 p-3 " + (showRoster ? "" : "justify-center")}>
-        <div className="tk-panel max-h-[calc(100vh-6.5rem)] overflow-auto bg-black">
+        {/* 全体を見るときはスクロールさせない。一覧性が村の価値なので、
+            スクロールが出た時点で「全員がどこにいるか」が一目で分からなくなる */}
+        <div className={"tk-panel bg-black " + (zoom === "close" ? "max-h-[calc(100vh-7rem)] overflow-auto" : "")}>
           <div className="relative" style={{ width: VILLAGE_W * SCALE, height: VILLAGE_H * SCALE }}>
             <canvas
               ref={canvasRef}
@@ -686,6 +788,74 @@ export default function VillagePage() {
               </div>
             )}
 
+            {/* 勤怠の下書きの印。自分のアバターの頭の上に出す。
+                tenko の主張は「チャットが勤怠になる」なので、村を見ただけで
+                「確定していない勤怠がある」ことが分かる必要がある */}
+            {drafts.length > 0 && myTag && (
+              <button
+                onClick={() => setShowDrafts((v) => !v)}
+                className="absolute z-10 border border-[var(--tk-ink)] px-1 text-[10px] font-bold"
+                style={{
+                  left: (myTag.x + PERSON_SIZE / 2) * SCALE,
+                  top: (myTag.y - 14) * SCALE,
+                  transform: "translateX(-50%)",
+                  background: "var(--tk-straw)", color: "var(--tk-ink)",
+                }}
+                title="確定していない勤怠の下書き"
+              >
+                勤怠 {drafts.length}
+              </button>
+            )}
+
+            {showDrafts && drafts.length > 0 && (
+              <div
+                className="tk-panel absolute z-20 w-64 p-2"
+                style={{
+                  left: Math.min((myTag?.x ?? 0) * SCALE, VILLAGE_W * SCALE - 270),
+                  top: Math.max(((myTag?.y ?? 0) - 16) * SCALE - 8, 4),
+                  transform: (myTag?.y ?? 0) > VILLAGE_H / 2 ? "translateY(-100%)" : "translateY(0)",
+                }}
+              >
+                <div className="tk-sep mb-1 flex items-center pb-1">
+                  <span className="text-xs font-bold">確定していない勤怠</span>
+                  <button onClick={() => setShowDrafts(false)} className="tk-btn tk-btn-quiet ml-auto px-1 py-0 text-[10px]">×</button>
+                </div>
+                <p className="mb-1 text-[10px]" style={{ color: "var(--tk-ink-soft)" }}>
+                  発言から立てた下書きです。押すまで勤怠には記録されません
+                </p>
+                <ul className="space-y-1">
+                  {drafts.map((d) => (
+                    <li key={d.id} className="tk-sep pb-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="px-1 text-[10px] text-white" style={{ background: "var(--tk-wood)" }}>
+                          {DRAFT_KIND[d.kind] ?? d.kind}
+                        </span>
+                        <span className="text-xs tabular-nums">
+                          {new Date(d.eventAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                        <span className="ml-auto flex gap-1">
+                          <button onClick={() => decideDraft(d.id, "confirm")} className="tk-btn px-1.5 py-0 text-[11px]">確定</button>
+                          <button onClick={() => decideDraft(d.id, "reject")} className="tk-btn tk-btn-quiet px-1.5 py-0 text-[11px]">却下</button>
+                        </span>
+                      </div>
+                      <p className="text-[10px]" style={{ color: "var(--tk-ink-soft)" }}>一致: {d.matchedText}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* 落とした結果の知らせ。断りではないので赤くしない */}
+            {notice && !denied && (
+              <div
+                className="absolute inset-x-0 top-2 z-20 mx-auto w-fit border border-[var(--tk-ink)] px-3 py-1 text-xs"
+                style={{ background: "var(--tk-paper)" }}
+                role="status"
+              >
+                {notice}
+              </div>
+            )}
+
             {/* 断られた理由（満員など）。押した本人にだけ出す */}
             {denied && (
               <div
@@ -729,9 +899,15 @@ export default function VillagePage() {
                         ))}
                       </div>
                       {pickedPerson?.roomId != null && (
-                        <p className="mt-0.5 text-[10px]" style={{ color: "var(--tk-ink-soft)" }}>
-                          いまは建物の中なので会議中です。出れば戻ります
-                        </p>
+                        <>
+                          <p className="mt-0.5 text-[10px]" style={{ color: "var(--tk-ink-soft)" }}>
+                            いまは建物の中なので会議中です
+                          </p>
+                          {/* ドラッグで出るのが基本だが、押して出る道も残す */}
+                          <button onClick={leaveBuilding} className={menuBtn + " mt-1 justify-center"}>
+                            建物から出る
+                          </button>
+                        </>
                       )}
                     </div>
                     <div>
@@ -865,9 +1041,17 @@ export default function VillagePage() {
             {nameOf(answered.id)} から {answered.text}
           </span>
         )}
-        <span className="ml-auto">
+        <span className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => setZoom((z) => (z === "fit" ? "close" : "fit"))}
+            className="tk-btn tk-btn-quiet"
+            title="村の見え方を切り替える"
+          >
+            {zoom === "fit" ? "寄る" : "全体を見る"}
+          </button>
+          {/* 「メンバー」だけでは押す動機が見えないので、村にいる人数を添える */}
           <button onClick={() => setShowRoster((v) => !v)} className={"tk-btn " + (showRoster ? "tk-btn-on" : "tk-btn-quiet")}>
-            メンバー
+            メンバー {inVillage}/{roster.length}
           </button>
         </span>
       </nav>
