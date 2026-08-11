@@ -12,7 +12,24 @@ const SLOTS = [
   { x: 2, y: 7 }, { x: 6, y: 7 }, { x: 33, y: 7 }, { x: 37, y: 7 },
   { x: 2, y: 17 }, { x: 6, y: 17 }, { x: 10, y: 17 }, { x: 29, y: 17 }, { x: 33, y: 17 }, { x: 37, y: 17 },
   { x: 2, y: 22 }, { x: 6, y: 22 }, { x: 30, y: 22 }, { x: 34, y: 22 },
+  // 交差点寄りの枠。村は密集しているから村に見えるため、中央付近にも建物を置く
+  { x: 14, y: 5 }, { x: 24, y: 5 }, { x: 16, y: 9 }, { x: 23, y: 9 }, { x: 14, y: 23 }, { x: 24, y: 23 },
 ];
+
+// 建物は部屋の並び順に枠を使うため、枠の並びが左上→右上の順だと
+// 部屋が少ないうちは建物が左上に固まる（本番の描画で実測して気づいた）。
+// 4つの区画を順ぐりに使うよう並べ替える。これで部屋が4件あれば各区画に1棟、8件で2棟ずつになる。
+(function interleaveSlots() {
+  const cx = ROAD_V[0], cy = ROAD_H[0];
+  const q = [[], [], [], []];   // 左上 / 右上 / 左下 / 右下
+  for (const s of SLOTS) q[(s.x < cx ? 0 : 1) + (s.y < cy ? 0 : 2)].push(s);
+  const out = [];
+  for (let i = 0; out.length < SLOTS.length; i++) {
+    for (const arr of q) if (arr[i]) out.push(arr[i]);
+  }
+  SLOTS.length = 0;
+  for (const s of out) SLOTS.push(s);
+})();
 
 const blocked = new Set();
 const block = (x, y) => blocked.add(x + "," + y);
@@ -27,7 +44,7 @@ const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fff
 
 // 装飾は道沿いと建物の周りに寄せると村らしくなる。完全な一様分布にはしない
 const weightAt = (x, y) => {
-  let w = 0.05;
+  let w = 0.06;
   for (const ry of ROAD_H) if (Math.abs(y - ry) <= 3) w += 0.34;
   for (const rx of ROAD_V) if (Math.abs(x - rx) <= 3) w += 0.34;
   for (const sl of SLOTS) if (Math.abs(x - sl.x) <= 3 && Math.abs(y - sl.y) <= 3) w += 0.42;

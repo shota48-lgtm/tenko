@@ -6,7 +6,7 @@ import variantA from "./variant-a.json";
 import variantB from "./variant-b.json";
 import variantC from "./variant-c.json";
 
-export const ACTIVE_VARIANT: "a" | "b" | "c" = "b";
+export const ACTIVE_VARIANT: "a" | "b" | "c" = "a";
 
 export type SpriteSheet = {
   meta: { variant: string; name: string; description: string };

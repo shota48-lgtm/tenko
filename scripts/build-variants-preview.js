@@ -20,7 +20,7 @@ const head = `<!doctype html>
 <meta charset="utf-8">
 <title>tenko 村のバリアント比較</title>
 <style>
-  body { font-family: sans-serif; background: #f2f0ea; color: #2b2823; margin: 24px; max-width: 1400px; }
+  body { font-family: sans-serif; background: #f2f0ea; color: #2b2823; margin: 24px; max-width: 1500px; }
   h1 { margin-bottom: 4px; }
   h2 { margin-top: 40px; padding: 6px 10px; background: #e2ded2; border-radius: 4px; }
   h3 { margin-top: 24px; font-size: 15px; color: #4a4437; }
@@ -33,6 +33,8 @@ const head = `<!doctype html>
   .cell canvas { border: 1px solid #c9c3b4; background: #fff; }
   .cell span { display: block; margin-top: 3px; }
   .scroll { overflow-x: auto; border: 1px solid #c9c3b4; background: #000; }
+  .whole { border: 1px solid #c9c3b4; background: #000; display: inline-block; }
+  .warn { font-size: 12px; color: #8a4a2f; }
   .swatches { display: flex; flex-wrap: wrap; gap: 8px; }
   .sw { width: 84px; font-size: 11px; }
   .sw .chip { height: 32px; border: 1px solid #c9c3b4; }
@@ -134,11 +136,17 @@ VARIANTS.forEach((V) => {
   p.textContent = V.meta.description;
   root.appendChild(p);
 
-  const h3a = document.createElement("h3"); h3a.textContent = "村の全体像（実寸の4倍）"; root.appendChild(h3a);
+  const h3z = document.createElement("h3"); h3z.textContent = "村の全体像（2倍。切れずに全体が入る。まずこれを見てください）"; root.appendChild(h3z);
+  const w2 = document.createElement("div"); w2.className = "whole"; w2.appendChild(village(V, 2)); root.appendChild(w2);
+
+  const h3a = document.createElement("h3"); h3a.textContent = "村の全体像（実寸の4倍。細部の確認用）"; root.appendChild(h3a);
+  const warn = document.createElement("p"); warn.className = "warn";
+  warn.textContent = "4倍は " + (MAP.width * 16 * 4) + "px 幅あり、この枠に収まりません。枠の中を横にスクロールして見てください。左端だけを見ると、噴水が右端にあり建物が左に偏っているように見えます（実際は中央と4区画に分散しています）。";
+  root.appendChild(warn);
   const w4 = document.createElement("div"); w4.className = "scroll"; w4.appendChild(village(V, 4)); root.appendChild(w4);
 
   const h3b = document.createElement("h3"); h3b.textContent = "村の全体像（実寸 1倍。実際の画面ではこの大きさで見える）"; root.appendChild(h3b);
-  const w1 = document.createElement("div"); w1.className = "scroll"; w1.appendChild(village(V, 1)); root.appendChild(w1);
+  const w1 = document.createElement("div"); w1.className = "whole"; w1.appendChild(village(V, 1)); root.appendChild(w1);
 
   const h3c = document.createElement("h3"); h3c.textContent = "人物 4状態（8倍）"; root.appendChild(h3c);
   const g1 = document.createElement("div"); g1.className = "grid";
