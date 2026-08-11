@@ -198,70 +198,127 @@ export default function Home() {
   };
 
   return (
-    <main style={{ padding: 24, fontFamily: "sans-serif", maxWidth: 720 }}>
-      <h1>tenko / 部屋 {roomId}</h1>
-      <p><a href="/village">村の画面へ</a></p>
-      <p>
-        接続状態: <strong data-testid="conn">{conn}</strong>
-        {pending.length > 0 && <span>（未送信 {pending.length} 件）</span>}
-      </p>
+    <main className="min-h-screen bg-stone-100 text-stone-800">
+      <header className="border-b border-stone-300 bg-stone-50">
+        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2">
+          <h1 className="text-base font-semibold tracking-wide">tenko</h1>
+          <span className="text-sm text-stone-600">部屋 {roomId}</span>
+          <span
+            className={
+              "inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-xs " +
+              (conn === "接続中"
+                ? "border-emerald-700/30 bg-emerald-50 text-emerald-800"
+                : "border-amber-700/30 bg-amber-50 text-amber-800")
+            }
+          >
+            <span className={"h-1.5 w-1.5 rounded-full " + (conn === "接続中" ? "bg-emerald-600" : "bg-amber-500")} />
+            <span data-testid="conn">{conn}</span>
+            {pending.length > 0 && <span>（未送信 {pending.length} 件）</span>}
+          </span>
+          <a
+            href="/village"
+            className="ml-auto rounded-sm border border-stone-400 bg-stone-50 px-2.5 py-1 text-xs text-stone-700
+                       hover:bg-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+          >
+            村の画面へ
+          </a>
+        </div>
+      </header>
 
-      {drafts.length > 0 && (
-        <section style={{ border: "1px solid #c9a", padding: 8, margin: "12px 0" }}>
-          <h2 style={{ fontSize: 15, margin: "0 0 6px" }}>勤怠の下書き（未確定 {drafts.length} 件）</h2>
-          <p style={{ fontSize: 12, color: "#555", margin: "0 0 8px" }}>
-            発言から自動で立てた下書きです。確定するまで勤怠には記録されません。
-          </p>
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {drafts.map((d) => (
-              <li key={d.id} style={{ marginBottom: 8 }}>
-                <strong>{KIND_LABEL[d.kind]}</strong>{" "}
-                {new Date(d.event_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                <div style={{ fontSize: 12, color: "#444" }}>
-                  根拠の発言: 「{d.source_body ?? "(本文なし)"}」
-                  {d.source_deleted && <span>（この発言は削除されています）</span>}
-                </div>
-                <div style={{ fontSize: 11, color: "#777" }}>
-                  一致した箇所: {d.matched_text} / ルール: {d.rule_id}
-                </div>
-                <button onClick={() => decide(d.id, "confirm")}>確定</button>{" "}
-                <button onClick={() => decide(d.id, "reject")}>却下</button>
+      <div className="mx-auto max-w-3xl px-4 py-3">
+        {drafts.length > 0 && (
+          <section className="mb-3 rounded-sm border border-amber-700/40 bg-amber-50/60">
+            <div className="border-b border-amber-700/20 px-3 py-2">
+              <h2 className="text-sm font-semibold text-amber-900">勤怠の下書き（未確定 {drafts.length} 件）</h2>
+              <p className="mt-0.5 text-xs text-amber-900/80">
+                発言から自動で立てた下書きです。確定するまで勤怠には記録されません。
+              </p>
+            </div>
+            <ul className="divide-y divide-amber-700/15">
+              {drafts.map((d) => (
+                <li key={d.id} className="px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-sm bg-amber-800 px-1.5 py-0.5 text-[11px] text-amber-50">
+                      {KIND_LABEL[d.kind]}
+                    </span>
+                    <span className="text-sm tabular-nums">
+                      {new Date(d.event_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    <span className="ml-auto flex gap-2">
+                      <button
+                        onClick={() => decide(d.id, "confirm")}
+                        className="rounded-sm border border-stone-800 bg-stone-800 px-3 py-1 text-xs text-stone-50
+                                   hover:bg-stone-700 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                      >
+                        確定
+                      </button>
+                      <button
+                        onClick={() => decide(d.id, "reject")}
+                        className="rounded-sm border border-stone-400 bg-stone-50 px-3 py-1 text-xs text-stone-700
+                                   hover:bg-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                      >
+                        却下
+                      </button>
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-stone-700">
+                    根拠の発言: 「{d.source_body ?? "(本文なし)"}」
+                    {d.source_deleted && <span className="text-stone-500">（この発言は削除されています）</span>}
+                  </p>
+                  <p className="text-[11px] text-stone-500">
+                    一致した箇所: {d.matched_text} / ルール: {d.rule_id}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <section className="rounded-sm border border-stone-300 bg-white">
+          <ul className="max-h-[calc(100vh-16rem)] divide-y divide-stone-100 overflow-y-auto">
+            {messages.length === 0 && (
+              <li className="px-3 py-6 text-center text-xs text-stone-400">まだ発言がありません</li>
+            )}
+            {messages.map((m) => (
+              <li key={m.id} className="flex items-baseline gap-2 px-3 py-1.5">
+                <span className="w-10 shrink-0 text-right text-[11px] tabular-nums text-stone-400">#{m.id}</span>
+                <span className="shrink-0 text-xs font-medium text-stone-700">{m.display_name}</span>
+                <span className={"text-sm " + (m.deleted ? "italic text-stone-400" : "")}>
+                  {m.deleted ? "（削除された投稿）" : m.body}
+                </span>
+                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-stone-400">
+                  {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </li>
+            ))}
+            {pending.map((p) => (
+              <li key={p.clientMsgId} className="flex items-baseline gap-2 bg-stone-50 px-3 py-1.5 text-stone-400">
+                <span className="w-10 shrink-0 text-right text-[11px]">—</span>
+                <span className="text-sm">{p.body}</span>
+                <span className="ml-auto shrink-0 text-[11px]">未送信・復帰後に再送</span>
               </li>
             ))}
           </ul>
+
+          <div className="flex items-center gap-2 border-t border-stone-200 p-2">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") onSend(); }}
+              placeholder="発言を入力"
+              className="flex-1 rounded-sm border border-stone-400 bg-white px-2 py-1.5 text-sm
+                         placeholder:text-stone-400 focus:border-stone-600 focus:outline-none
+                         focus:ring-2 focus:ring-amber-500/40"
+            />
+            <button
+              onClick={onSend}
+              className="rounded-sm border border-stone-800 bg-stone-800 px-4 py-1.5 text-sm text-stone-50
+                         hover:bg-stone-700 active:bg-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+            >
+              送信
+            </button>
+          </div>
         </section>
-      )}
-
-      <ul>
-        {messages.map((m) => (
-          <li key={m.id}>
-            <span>#{m.id}</span> <strong>{m.display_name}</strong>{" "}
-            {m.deleted ? <em>（削除された投稿）</em> : m.body}{" "}
-            <small>{new Date(m.created_at).toLocaleTimeString()}</small>
-          </li>
-        ))}
-      </ul>
-
-      {pending.length > 0 && (
-        <ul>
-          {pending.map((p) => (
-            <li key={p.clientMsgId} style={{ opacity: 0.5 }}>
-              {p.body} <small>（未送信・復帰後に再送）</small>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <div>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onSend();
-          }}
-          placeholder="発言を入力"
-        />
-        <button onClick={onSend}>送信</button>
       </div>
     </main>
   );

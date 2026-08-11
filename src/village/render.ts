@@ -155,38 +155,21 @@ export function drawTalkMark(
   ctx.fillRect(x + 11, y + 12, 2, 2);
 }
 
-// 吹き出しを描く（案A: Canvas に描く方式）。
-// 枠はドット絵の画風に合わせて1ドットの縁で描く。文字は Canvas の fillText で載せる
-export function drawBubbles(
+// 吹き出しを出さない人の頭上に、小さな「メモあり」の印だけを描く。
+// 吹き出し本体は HTML 側（案B）で描く。Canvas に文字を描く案Aは、
+// 文字幅を測らずに枠を引いていたため、はみ出しが起きて不採用になった（PO判定）。
+export function drawNoteMarks(
   ctx: CanvasRenderingContext2D,
   s: SpriteSheet,
   layout: BubbleLayout,
 ) {
-  const fill = s.palette[8];    // 壁の色（明るい面）
-  const edge = s.palette[5];    // 輪郭
-  const text = s.palette[5];
-
-  // 吹き出しを出さない人には、頭上に小さな印だけ出す。
-  // 「書いてある人がいる」ことは分かり、画面は埋まらない
+  const edge = s.palette[5];
+  const fill = s.palette[8];
   for (const m of layout.markOnly) {
     ctx.fillStyle = edge;
     ctx.fillRect(m.x + 6, m.y - 4, 5, 4);
     ctx.fillStyle = fill;
     ctx.fillRect(m.x + 7, m.y - 3, 3, 2);
-  }
-
-  for (const b of layout.boxes) {
-    ctx.fillStyle = edge;
-    ctx.fillRect(b.x - 1, b.y - 1, b.w + 2, b.h + 2);
-    ctx.fillStyle = fill;
-    ctx.fillRect(b.x, b.y, b.w, b.h);
-    // しっぽ
-    ctx.fillStyle = edge;
-    for (let i = 0; i < 3; i++) ctx.fillRect(b.tailX - 1 + i, b.y + b.h + i, 3 - i, 1);
-    ctx.fillStyle = text;
-    ctx.font = "7px sans-serif";
-    ctx.textBaseline = "top";
-    b.lines.forEach((line, i) => ctx.fillText(line, b.x + 3, b.y + 2 + i * 7));
   }
 }
 

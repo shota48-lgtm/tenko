@@ -8,11 +8,15 @@
 //   - 投稿は HTTP。ここでは扱わない（建物を押すとチャット画面へ移る）
 //   - 位置は状態が決める。ドラッグや矢印キーによる自由移動は実装しない
 //   - 自動で変えてよいのは「離席」への切り替えだけ。人がいることを機械が主張しない
-import { useCallback, useEffect, useRef, useState } from "react";
+//
+// 画面の作り（Phase 4.6 でPOの実機確認を受けて作り直した）:
+//   - 村では吹き出しを3件まで。全員分は右の一覧で見る
+//   - 開発用の切り替え（見た目のA/B/C）は ?debug=1 のときだけ出す
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ACTIVE_VARIANT, VARIANTS, sheet } from "@/sprites";
 import {
-  drawVillage, drawBubbles, bubbleLayoutFor, hitBuilding, VILLAGE_W, VILLAGE_H,
+  drawVillage, drawNoteMarks, bubbleLayoutFor, hitBuilding, VILLAGE_W, VILLAGE_H,
   type Presence, type Room, type NoteMap, type TalkStatus,
 } from "@/village/render";
 
@@ -22,13 +26,15 @@ const STATES: Presence["state"][] = ["idle", "away", "talking", "resting"];
 const STATE_LABEL: Record<Presence["state"], string> = {
   idle: "在席", away: "離席", talking: "会話中", resting: "休憩中",
 };
+const TALKS: TalkStatus[] = ["ok", "later", "focus"];
 const TALK_LABEL: Record<TalkStatus, string> = {
   ok: "話しかけてOK", later: "後でならOK", focus: "集中中",
 };
 // 自動離席までの時間。仮説であり、実運用で調整する前提の値
 const IDLE_MINUTES = Number(process.env.NEXT_PUBLIC_TENKO_IDLE_MINUTES ?? 10);
-// 吹き出しの描き方。案A=Canvasに描く / 案B=HTMLを重ねる。比較のため両方持つ
-type BubbleMode = "canvas" | "html";
+const NOTE_MAX = 80;
+
+type User = { id: number; displayName: string };
 
 // 認証は未実装。利用者は暫定的に固定値で扱う
 function devUser() {
@@ -37,12 +43,24 @@ function devUser() {
   const id = Number(q.get("me") ?? 1);
   return { id, name: q.get("name") ?? "利用者" + id, colorIndex: ((id - 1) % 4) + 1 };
 }
+function isDebug() {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("debug") === "1";
+}
+
+// 押せるものは押せる見た目にする。選択中は反転させて一目で分かるようにする
+const segBase =
+  "px-2.5 py-1 text-xs border border-stone-400 -ml-px first:ml-0 transition-colors " +
+  "focus:outline-none focus:ring-2 focus:ring-amber-500/50";
+const segOn = "bg-stone-800 text-stone-50 border-stone-800";
+const segOff = "bg-stone-50 text-stone-700 hover:bg-stone-200 active:bg-stone-300";
 
 export default function VillagePage() {
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [variant, setVariant] = useState<"a" | "b" | "c">(ACTIVE_VARIANT);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [people, setPeople] = useState<Presence[]>([]);
   const [notes, setNotes] = useState<NoteMap>({});
   const [conn, setConn] = useState<"接続中" | "切断" | "再接続中">("再接続中");
@@ -51,16 +69,16 @@ export default function VillagePage() {
   const [stale, setStale] = useState(false);
   const [noteInput, setNoteInput] = useState("");
   const [noteError, setNoteError] = useState<string | null>(null);
-  const [bubbleMode, setBubbleMode] = useState<BubbleMode>("html");
+  const [noteSaved, setNoteSaved] = useState(false);
   const [autoAway, setAutoAway] = useState(false);
   const [me, setMe] = useState({ id: 1, name: "利用者1", colorIndex: 1 });
+  const [debug, setDebug] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const userRef = useRef(me);
   const myStateRef = useRef<Presence["state"]>("idle");
   const talkRef = useRef<TalkStatus>("ok");
   const lastActiveRef = useRef<number>(0);
-  const manualAwayRef = useRef(false);
 
   useEffect(() => { myStateRef.current = myState; }, [myState]);
   useEffect(() => { talkRef.current = talk; }, [talk]);
@@ -86,27 +104,20 @@ export default function VillagePage() {
     } catch { /* 取れなくても村は描く */ }
   }, []);
 
-  const loadMyNote = useCallback(async (uid: number) => {
-    try {
-      const res = await fetch("/api/notes?user=" + uid);
-      if (!res.ok) return;
-      const d = await res.json();
-      setNoteInput(d.note?.body ?? "");
-    } catch { /* 無視 */ }
-  }, []);
-
-  // 部屋は HTTP で取る
   useEffect(() => {
     const t = setTimeout(() => {
       const u = devUser();
       setMe(u);
       userRef.current = u;
+      setDebug(isDebug());
       void fetch("/api/rooms").then((r) => r.json()).then((d) => setRooms(d.rooms ?? [])).catch(() => {});
+      void fetch("/api/users").then((r) => r.json()).then((d) => setUsers(d.users ?? [])).catch(() => {});
       void loadNotes();
-      void loadMyNote(u.id);
+      void fetch("/api/notes?user=" + u.id).then((r) => r.json())
+        .then((d) => setNoteInput(d.note?.body ?? "")).catch(() => {});
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes, loadMyNote]);
+  }, [loadNotes]);
 
   // WebSocket。在席と「話しかけてよいか」を配る
   useEffect(() => {
@@ -128,7 +139,14 @@ export default function VillagePage() {
       ws.onmessage = (e) => {
         try {
           const d = JSON.parse(e.data as string);
-          if (d.type === "presence.list") setPeople(d.users ?? []);
+          if (d.type === "presence.list") {
+            // 同じ利用者が複数の端末から接続していても、村では1人として扱う。
+            // サーバー側でも畳んでいるが、古いサーバーに繋いだ場合に
+            // 同じ利用者が2人描かれ、React の key が重複する（実測で発見）ため、ここでも畳む
+            const byId = new Map<number, Presence>();
+            for (const p of (d.users ?? []) as Presence[]) byId.set(Number(p.id), { ...p, id: Number(p.id) });
+            setPeople(Array.from(byId.values()));
+          }
         } catch { /* 解釈できない通知は捨てる */ }
       };
       ws.onclose = () => {
@@ -147,9 +165,7 @@ export default function VillagePage() {
     };
   }, [announce]);
 
-  // 自動離席（機能2）。
-  // 操作が無い時間が閾値を超えたら away にする。戻すのは手動のみ。
-  // 「人がいる」ことを機械が勝手に主張しないため、idle への自動復帰はしない
+  // 自動離席。away にするだけで、idle へは自動で戻さない
   useEffect(() => {
     lastActiveRef.current = Date.now();
     const touch = () => { lastActiveRef.current = Date.now(); };
@@ -160,9 +176,7 @@ export default function VillagePage() {
 
     const timer = setInterval(() => {
       if (myStateRef.current === "away") return;
-      const idleMs = Date.now() - lastActiveRef.current;
-      if (idleMs >= IDLE_MINUTES * 60_000) {
-        manualAwayRef.current = false;
+      if (Date.now() - lastActiveRef.current >= IDLE_MINUTES * 60_000) {
         setAutoAway(true);
         setMyState("away");
         announce("away", talkRef.current);
@@ -176,11 +190,12 @@ export default function VillagePage() {
     };
   }, [announce]);
 
-  // 通知を受けたら今日やることも取り直す（他人が書き換えている可能性がある）
   useEffect(() => {
     const t = setInterval(() => { void loadNotes(); }, 30_000);
     return () => clearInterval(t);
   }, [loadNotes]);
+
+  const layout = useMemo(() => bubbleLayoutFor(rooms, people, notes), [rooms, people, notes]);
 
   // 描画
   useEffect(() => {
@@ -191,10 +206,8 @@ export default function VillagePage() {
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, VILLAGE_W, VILLAGE_H);
     drawVillage(ctx, sheet(variant), rooms, people);
-    if (bubbleMode === "canvas") {
-      drawBubbles(ctx, sheet(variant), bubbleLayoutFor(rooms, people, notes));
-    }
-  }, [rooms, people, notes, variant, bubbleMode]);
+    drawNoteMarks(ctx, sheet(variant), layout);
+  }, [rooms, people, variant, layout]);
 
   const onClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const cv = canvasRef.current;
@@ -207,7 +220,6 @@ export default function VillagePage() {
   };
 
   const changeState = useCallback((s: Presence["state"]) => {
-    manualAwayRef.current = s === "away";
     setAutoAway(false);
     lastActiveRef.current = Date.now();
     setMyState(s);
@@ -221,6 +233,7 @@ export default function VillagePage() {
 
   const saveNote = async () => {
     setNoteError(null);
+    setNoteSaved(false);
     const res = await fetch("/api/notes", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -233,120 +246,236 @@ export default function VillagePage() {
     }
     const j = await res.json();
     setNoteInput(j.note.body);
+    setNoteSaved(true);
     await loadNotes();
   };
 
   const clearNote = async () => {
     await fetch("/api/notes", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
+      method: "DELETE", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user: me.id }),
     });
     setNoteInput("");
+    setNoteSaved(false);
     await loadNotes();
   };
 
-  const layout = bubbleLayoutFor(rooms, people, notes);
+  // 全員の一覧。村にいない人（退勤・未接続）も出す
+  const roster = useMemo(() => {
+    const byId = new Map<number, Presence>();
+    for (const p of people) byId.set(Number(p.id), p);
+    const order: Record<string, number> = { talking: 0, idle: 1, resting: 2, away: 3, off: 4 };
+    return users
+      .map((u) => {
+        const p = byId.get(u.id);
+        return {
+          id: u.id,
+          name: p?.name ?? u.displayName,
+          state: (p?.state ?? "off") as Presence["state"] | "off",
+          talk: p?.talk,
+          note: notes[u.id] ?? "",
+        };
+      })
+      .sort((a, b) => (order[a.state] - order[b.state]) || a.id - b.id);
+  }, [users, people, notes]);
+
+  const inVillage = roster.filter((r) => r.state !== "off").length;
 
   return (
-    <main style={{ padding: 16, fontFamily: "sans-serif" }}>
-      <h1 style={{ fontSize: 18 }}>tenko / 村</h1>
+    <main className="min-h-screen bg-stone-100 text-stone-800">
+      {/* ヘッダ。押せるもの・読むもの・入力欄を、余白と枠で分ける */}
+      <header className="border-b border-stone-300 bg-stone-50">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2">
+          <h1 className="text-base font-semibold tracking-wide">tenko</h1>
 
-      <p style={{ fontSize: 13 }}>
-        接続状態: <strong>{conn}</strong>
-        {stale && <span>（表示は切断前の情報です）</span>}
-        ／ 部屋 {rooms.length} / 村の人 {people.length}
-        ／ 見た目:{" "}
-        {(["a", "b", "c"] as const).map((k) => (
-          <button key={k} onClick={() => setVariant(k)} disabled={k === variant} style={{ marginRight: 4 }}>
-            {k.toUpperCase()} {VARIANTS[k].meta.name}
-          </button>
-        ))}
-      </p>
+          <span
+            className={
+              "inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-xs " +
+              (conn === "接続中"
+                ? "border-emerald-700/30 bg-emerald-50 text-emerald-800"
+                : "border-amber-700/30 bg-amber-50 text-amber-800")
+            }
+            title={stale ? "切断中のため、表示は切断前の情報です" : undefined}
+          >
+            <span className={"h-1.5 w-1.5 rounded-full " + (conn === "接続中" ? "bg-emerald-600" : "bg-amber-500")} />
+            {conn}
+            {stale && <span className="text-amber-800">（表示は切断前）</span>}
+          </span>
 
-      <p style={{ fontSize: 13 }}>
-        自分の状態:{" "}
-        {STATES.map((s) => (
-          <button key={s} onClick={() => changeState(s)} disabled={s === myState} style={{ marginRight: 4 }}>
-            {STATE_LABEL[s]}
-          </button>
-        ))}
-        {autoAway && <span style={{ color: "#a60" }}>（{IDLE_MINUTES}分操作がないため自動で離席にしました。戻すには押してください）</span>}
-      </p>
-
-      <p style={{ fontSize: 13 }}>
-        話しかけて:{" "}
-        {(["ok", "later", "focus"] as const).map((t) => (
-          <button key={t} onClick={() => changeTalk(t)} disabled={t === talk} style={{ marginRight: 4 }}>
-            {TALK_LABEL[t]}
-          </button>
-        ))}
-      </p>
-
-      <p style={{ fontSize: 13 }}>
-        今日やること:{" "}
-        <input
-          value={noteInput}
-          onChange={(e) => setNoteInput(e.target.value)}
-          maxLength={200}
-          placeholder="例: 見積もりの作成と、15時の打ち合わせ"
-          style={{ width: 380 }}
-        />{" "}
-        <button onClick={saveNote}>保存</button>{" "}
-        <button onClick={clearNote}>消す</button>
-        {noteError && <span style={{ color: "#a33" }}>　{noteError}</span>}
-        <span style={{ color: "#666" }}>　日付が変わると自動で空になります</span>
-      </p>
-
-      <p style={{ fontSize: 13 }}>
-        吹き出しの出し方:{" "}
-        <button onClick={() => setBubbleMode("html")} disabled={bubbleMode === "html"}>案B: HTMLを重ねる</button>{" "}
-        <button onClick={() => setBubbleMode("canvas")} disabled={bubbleMode === "canvas"}>案A: ドット絵に描く</button>
-        {layout.hiddenCount > 0 && <span>　（吹き出しは {layout.boxes.length} 件まで表示。他 {layout.hiddenCount} 人）</span>}
-      </p>
-
-      <div style={{ overflow: "auto", border: "1px solid #ccc", display: "inline-block", background: "#000" }}>
-        <div style={{ position: "relative", width: VILLAGE_W * SCALE, height: VILLAGE_H * SCALE }}>
-          <canvas
-            ref={canvasRef}
-            width={VILLAGE_W}
-            height={VILLAGE_H}
-            onClick={onClick}
-            style={{
-              width: VILLAGE_W * SCALE,
-              height: VILLAGE_H * SCALE,
-              imageRendering: "pixelated",
-              cursor: "pointer",
-              display: "block",
-            }}
-          />
-          {bubbleMode === "html" && layout.boxes.map((b) => (
-            // 本文は React のテキストとして入れる。HTMLとして解釈させない（dangerouslySetInnerHTML は使わない）
-            <div
-              key={b.userId}
-              style={{
-                position: "absolute",
-                left: b.x * SCALE,
-                top: b.y * SCALE,
-                maxWidth: 200,
-                background: "#f4efe2",
-                border: "1px solid #3f382c",
-                borderRadius: 3,
-                padding: "2px 5px",
-                fontSize: 11,
-                lineHeight: "13px",
-                color: "#2b2823",
-                pointerEvents: "none",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-all",
-              }}
+          <div className="ml-auto flex items-center gap-2">
+            <label htmlFor="note" className="text-xs text-stone-500">今日やること</label>
+            <input
+              id="note"
+              value={noteInput}
+              onChange={(e) => { setNoteInput(e.target.value); setNoteSaved(false); }}
+              onKeyDown={(e) => { if (e.key === "Enter") void saveNote(); }}
+              maxLength={200}
+              placeholder="例: 見積もりの作成と、15時の打ち合わせ"
+              className="w-72 rounded-sm border border-stone-400 bg-white px-2 py-1 text-xs
+                         placeholder:text-stone-400 focus:border-stone-600 focus:outline-none
+                         focus:ring-2 focus:ring-amber-500/40"
+            />
+            <span className={"text-[11px] tabular-nums " + (noteInput.length > NOTE_MAX ? "text-red-700" : "text-stone-400")}>
+              {Array.from(noteInput).length}/{NOTE_MAX}
+            </span>
+            <button
+              onClick={saveNote}
+              className="rounded-sm border border-stone-800 bg-stone-800 px-3 py-1 text-xs text-stone-50
+                         hover:bg-stone-700 active:bg-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
             >
-              {b.lines.join("")}
-            </div>
-          ))}
+              保存
+            </button>
+            <button
+              onClick={clearNote}
+              className="rounded-sm border border-stone-400 bg-stone-50 px-2 py-1 text-xs text-stone-600
+                         hover:bg-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+            >
+              消す
+            </button>
+          </div>
         </div>
+
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-stone-200 px-4 py-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-stone-500">自分の状態</span>
+            <div className="flex rounded-sm">
+              {STATES.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => changeState(s)}
+                  aria-pressed={s === myState}
+                  className={segBase + " " + (s === myState ? segOn : segOff)}
+                >
+                  {STATE_LABEL[s]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-stone-500">話しかけて</span>
+            <div className="flex rounded-sm">
+              {TALKS.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => changeTalk(t)}
+                  aria-pressed={t === talk}
+                  className={segBase + " " + (t === talk ? segOn : segOff)}
+                >
+                  {TALK_LABEL[t]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {noteError && <span className="text-xs text-red-700">{noteError}</span>}
+          {noteSaved && !noteError && <span className="text-xs text-emerald-700">保存しました</span>}
+          {autoAway && (
+            <span className="text-xs text-amber-800">
+              {IDLE_MINUTES}分操作がないため離席にしました。戻すには「在席」を押してください
+            </span>
+          )}
+        </div>
+
+        {debug && (
+          <div className="flex items-center gap-2 border-t border-stone-200 bg-stone-100 px-4 py-1.5">
+            <span className="text-[11px] text-stone-500">開発用（?debug=1）</span>
+            <div className="flex">
+              {(["a", "b", "c"] as const).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => setVariant(k)}
+                  aria-pressed={k === variant}
+                  className={segBase + " " + (k === variant ? segOn : segOff)}
+                >
+                  {k.toUpperCase()} {VARIANTS[k].meta.name}
+                </button>
+              ))}
+            </div>
+            <span className="text-[11px] text-stone-500">部屋 {rooms.length} / 村の人 {inVillage}</span>
+          </div>
+        )}
+      </header>
+
+      <div className="flex items-start gap-3 p-3">
+        {/* 村 */}
+        {/* 村。画面に収まらない場合はページ全体ではなくこの枠の中でスクロールさせる。
+            ヘッダと一覧を常に見える位置に留めるため */}
+        <div className="max-h-[calc(100vh-8.5rem)] overflow-auto border border-stone-300 bg-black">
+          <div className="relative" style={{ width: VILLAGE_W * SCALE, height: VILLAGE_H * SCALE }}>
+            <canvas
+              ref={canvasRef}
+              width={VILLAGE_W}
+              height={VILLAGE_H}
+              onClick={onClick}
+              className="block cursor-pointer"
+              style={{ width: VILLAGE_W * SCALE, height: VILLAGE_H * SCALE, imageRendering: "pixelated" }}
+            />
+            {layout.boxes.map((b) => {
+              // 人物の頭の真上に中心を合わせる。実際の枠の幅で中心を取りたいので translate(-50%) を使う。
+              // ただし村の端では枠が外にはみ出して読めなくなるため、見込み幅で判定して端に寄せる。
+              const half = (b.w * SCALE) / 2;
+              const cx = b.tailX * SCALE;
+              const right = VILLAGE_W * SCALE;
+              let left = cx;
+              let tx = "-50%";
+              if (cx - half < 2) { left = 2; tx = "0"; }
+              else if (cx + half > right - 2) { left = right - 2; tx = "-100%"; }
+              return (
+                // 本文は React のテキストとして入れる。HTMLとして解釈させない
+                <div
+                  key={b.userId}
+                  className="pointer-events-none absolute border border-stone-900 bg-[#f6f1e3] px-1 py-0.5
+                             text-[11px] leading-[13px] text-stone-900 shadow-[1px_1px_0_rgba(0,0,0,0.35)]"
+                  style={{
+                    left,
+                    top: b.tailY * SCALE,
+                    transform: `translate(${tx}, -100%)`,
+                    maxWidth: 190,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {b.lines.join("")}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 全員の一覧。村は3件までなので、全員分はここで見る */}
+        <aside className="w-72 shrink-0 border border-stone-300 bg-stone-50">
+          <div className="flex items-baseline justify-between border-b border-stone-200 px-3 py-2">
+            <h2 className="text-sm font-semibold">今日やること</h2>
+            <span className="text-[11px] text-stone-500">{roster.length} 人</span>
+          </div>
+          <ul className="max-h-[calc(100vh-11rem)] divide-y divide-stone-200 overflow-y-auto">
+            {roster.map((r) => (
+              <li key={r.id} className="px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className={"h-2 w-2 shrink-0 rounded-full " + (
+                    r.state === "idle" ? "bg-emerald-600"
+                      : r.state === "talking" ? "bg-sky-600"
+                        : r.state === "resting" ? "bg-amber-500"
+                          : r.state === "away" ? "bg-stone-400" : "bg-stone-300"
+                  )} />
+                  <span className="truncate text-xs font-medium">{r.name}</span>
+                  <span className="ml-auto shrink-0 text-[11px] text-stone-500">
+                    {r.state === "off" ? "村にいない" : STATE_LABEL[r.state]}
+                  </span>
+                </div>
+                <p className={"mt-0.5 line-clamp-2 pl-4 text-xs " + (r.note ? "text-stone-700" : "text-stone-400")} title={r.note || undefined}>
+                  {r.note || "未記入"}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </aside>
       </div>
-      <p style={{ fontSize: 12, color: "#555" }}>建物を押すと、その部屋のチャットが開きます。</p>
+
+      <p className="px-4 pb-3 text-xs text-stone-500">
+        建物を押すと、その部屋のチャットが開きます。
+      </p>
     </main>
   );
 }

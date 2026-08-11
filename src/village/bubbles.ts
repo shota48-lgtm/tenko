@@ -40,11 +40,14 @@ export const BUBBLE = {
   maxVisible: 3,
   maxLines: 2,
   maxCharsPerLine: 14,  // 全角換算
+  // 以下は HTML の吹き出し（案B）の見え方に合わせた見込み値。
+  // 実際の枠は文字に追従するため、ここでの幅は「中心を合わせる」ためだけに使う。
   padX: 3,
   padY: 2,
   lineHeight: 7,
   charW: 6,             // 全角1文字あたりの見込み幅（ドット）
-  tail: 3,
+  // 人物の頭と吹き出しの距離。離すと別々のものに見えるため詰める（PO指摘）
+  tail: 1,
 };
 
 const widthOf = (ch: string) => {
