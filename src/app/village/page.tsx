@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ACTIVE_VARIANT, VARIANTS, sheet } from "@/sprites";
 import {
-  drawVillage, drawNoteMarks, bubbleLayoutFor, hitBuilding, VILLAGE_W, VILLAGE_H,
+  drawVillage, drawGround, drawNoteMarks, bubbleLayoutFor, hitBuilding, VILLAGE_W, VILLAGE_H,
   type Presence, type Room, type NoteMap, type TalkStatus,
 } from "@/village/render";
 
@@ -197,7 +197,20 @@ export default function VillagePage() {
 
   const layout = useMemo(() => bubbleLayoutFor(rooms, people, notes), [rooms, people, notes]);
 
-  // 描画
+  // 地面は変わらないので、一度だけ別のキャンバスに描いて使い回す。
+  // 毎回描き直すと1ドットずつ約27万回の描画になり、人の出入りのたびに画面が固まる（実機で確認）
+  const ground = useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const off = document.createElement("canvas");
+    off.width = VILLAGE_W;
+    off.height = VILLAGE_H;
+    const octx = off.getContext("2d");
+    if (!octx) return null;
+    drawGround(octx, sheet(variant));
+    return off;
+  }, [variant]);
+
+  // 変わるものだけを描く
   useEffect(() => {
     const cv = canvasRef.current;
     if (!cv) return;
@@ -205,9 +218,11 @@ export default function VillagePage() {
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, VILLAGE_W, VILLAGE_H);
-    drawVillage(ctx, sheet(variant), rooms, people);
+    const bg = ground;
+    if (bg) ctx.drawImage(bg, 0, 0);
+    drawVillage(ctx, sheet(variant), rooms, people, !bg);
     drawNoteMarks(ctx, sheet(variant), layout);
-  }, [rooms, people, variant, layout]);
+  }, [rooms, people, variant, layout, ground]);
 
   const onClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const cv = canvasRef.current;

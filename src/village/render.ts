@@ -83,12 +83,10 @@ export function personSpots(rooms: Room[], people: Presence[]) {
   return out;
 }
 
-export function drawVillage(
-  ctx: CanvasRenderingContext2D,
-  s: SpriteSheet,
-  rooms: Room[],
-  people: Presence[],
-) {
+// 地面・道・装飾だけを描く。中身は変わらないので、画面側は一度だけ描いて使い回す。
+// 1ドットずつ塗るため、村全体で約27万回の描画になる。
+// 在席が変わるたびにこれを描き直すと画面が固まる（実機で確認）。
+export function drawGround(ctx: CanvasRenderingContext2D, s: SpriteSheet) {
   ctx.imageSmoothingEnabled = false;
   const m = villageMap;
   for (let y = 0; y < m.height; y++) {
@@ -111,6 +109,19 @@ export function drawVillage(
     }
   }
   for (const d of m.deco) paint(ctx, s, d.sprite, d.x * TILE, d.y * TILE);
+}
+
+// 変わるものだけを描く（建物の窓・噴水・人物）。在席が変わるたびに呼ぶのはこちら
+export function drawVillage(
+  ctx: CanvasRenderingContext2D,
+  s: SpriteSheet,
+  rooms: Room[],
+  people: Presence[],
+  withGround = true,
+) {
+  ctx.imageSmoothingEnabled = false;
+  const m = villageMap;
+  if (withGround) drawGround(ctx, s);
 
   // 建物。その部屋で会話中の人がいれば窓を明るくする
   const talkingRooms = new Set(people.filter((p) => p.state === "talking" && p.roomId != null).map((p) => p.roomId));
