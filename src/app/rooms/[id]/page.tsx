@@ -9,12 +9,8 @@
 //     再送しても重複しないことは DB の一意制約が保証する
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 
-function currentRoomId() {
-  if (typeof window === "undefined") return 1;
-  const q = Number(new URLSearchParams(window.location.search).get("room"));
-  return Number.isInteger(q) && q > 0 ? q : 1;
-}
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 
 type Message = {
@@ -45,7 +41,11 @@ const KIND_LABEL: Record<Draft["kind"], string> = { arrive: "出社", leave: "�
 type ConnState = "接続中" | "切断" | "再接続中";
 
 export default function Home() {
-  const roomId = typeof window === "undefined" ? 1 : currentRoomId();
+  // 部屋は URL の /rooms/<id> から取る。
+  // window.location を読む形にしていたところ、転送の直後に古い値を読んで
+  // 「部屋 1」と表示された（実機で確認）。ルーターの値を使う
+  const params = useParams<{ id: string }>();
+  const roomId = Number(params?.id ?? 1) || 1;
   const [messages, setMessages] = useState<Message[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
   const [conn, setConn] = useState<ConnState>("再接続中");

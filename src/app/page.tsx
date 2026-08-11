@@ -119,6 +119,14 @@ export default function VillagePage() {
 
   useEffect(() => {
     const t = setTimeout(() => {
+      // 旧URL（/?room=1 でチャットを開く形）を受けたら、新しいURLへ送る。
+      // Phase 4.7 で / を村にしたため、そのままだと旧リンクが村を開いてしまう
+      const q = new URLSearchParams(window.location.search);
+      const legacyRoom = Number(q.get("room"));
+      if (Number.isInteger(legacyRoom) && legacyRoom > 0) {
+        router.replace("/rooms/" + legacyRoom);
+        return;
+      }
       const u = devUser();
       setMe(u);
       userRef.current = u;
@@ -130,7 +138,7 @@ export default function VillagePage() {
         .then((d) => setNoteInput(d.note?.body ?? "")).catch(() => {});
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes]);
+  }, [loadNotes, router]);
 
   // WebSocket。在席と「話しかけてよいか」を配る
   useEffect(() => {
