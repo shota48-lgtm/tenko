@@ -118,7 +118,7 @@ export function layoutBubbles(
     const tailX = it.x + 8;
     const tailY = it.y + 1;
     let x = Math.round(tailX - w / 2);
-    let y = tailY - cfg.tail - h;
+    const y = tailY - cfg.tail - h;
 
     // 村の外にはみ出さないよう寄せる
     if (x < 1) x = 1;
