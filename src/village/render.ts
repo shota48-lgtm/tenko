@@ -25,7 +25,8 @@ export type TalkStatus = "ok" | "later" | "focus";
 export type NoteMap = Record<number, string>;
 // kind は rooms テーブルの列。どの建物で描くかは並び順ではなくこの値だけで決まる
 // capacity は定員（Phase 4.8）。満員の判定はサーバー側で行い、ここでは見せるだけ
-export type Room = { id: number; name: string; kind: "room" | "hall"; capacity?: number };
+// deco は屋根の印を決める列（Phase 4.10）。名前からは推測しない
+export type Room = { id: number; name: string; kind: "room" | "hall"; capacity?: number; deco?: string };
 // 部屋ごとの人数。ws-server が配る
 export type RoomCounts = Record<number, { used: number; capacity: number }>;
 export type BuildingRect = { room: Room; x: number; y: number; w: number; h: number };
@@ -96,20 +97,28 @@ export function drawStateRing(
 // 部屋ごとの印。7棟が同じ絵なので、色と形で性格を分ける。
 // 新しい32x32のスプライトは作らない。建物の絵はそのままに、屋根の下へ小さな看板を描く。
 // 色はパレット16色から採る（色数を増やさない）
-const ROOM_MARKS: { key: string; color: number; shape: "square" | "triangle" | "cross" | "circle" | "bar" }[] = [
-  { key: "開発", color: 14, shape: "square" },    // 青
-  { key: "営業", color: 13, shape: "triangle" },  // 赤
-  { key: "休憩", color: 15, shape: "circle" },    // 緑
-  { key: "会議", color: 12, shape: "bar" },       // 紫
-  { key: "サポート", color: 6, shape: "cross" },  // 藁色
-  { key: "オフィス", color: 9, shape: "square" }, // 木
-  { key: "広間", color: 10, shape: "circle" },    // 明るい藁
-];
-// 部屋名から印を決める。名前で決めるので、DBに列を足さずに済む。
-// 当てはまらない部屋は、IDで順に割り当てる（同じ部屋には必ず同じ印が付く）
-export function markFor(room: Room) {
-  const hit = ROOM_MARKS.find((m) => room.name.includes(m.key));
-  return hit ?? ROOM_MARKS[Number(room.id) % ROOM_MARKS.length];
+export type RoomDeco = "dev" | "sales" | "meeting" | "rest" | "support" | "office" | "hall" | "other";
+type Mark = { color: number; shape: "square" | "triangle" | "cross" | "circle" | "bar" | "diamond" | "dot" };
+
+// 種別ごとの印。色はパレット16色から採る（色数を増やさない）。
+// 形も変えているのは、色だけに頼らないため（色の見分けがつかない人にも区別できる）
+const ROOM_MARKS: Record<RoomDeco, Mark> = {
+  dev: { color: 14, shape: "square" },      // 青・四角
+  sales: { color: 13, shape: "triangle" },  // 赤・三角
+  meeting: { color: 12, shape: "bar" },     // 紫・横棒
+  rest: { color: 15, shape: "circle" },     // 緑・丸
+  support: { color: 6, shape: "cross" },    // 藁色・十字
+  office: { color: 9, shape: "diamond" },   // 木・ひし形
+  hall: { color: 10, shape: "dot" },        // 明るい藁・点
+  other: { color: 5, shape: "dot" },        // 濃色・点
+};
+
+// 印は rooms.deco の値だけで決まる（Phase 4.10）。
+// 以前は部屋名に含まれる語から決めていたため、名前を変えると印が変わる形になっていた。
+// 見た目を決める値は名前とは別に持つ
+export function markFor(room: Room): Mark {
+  const key = (room.deco ?? "other") as RoomDeco;
+  return ROOM_MARKS[key] ?? ROOM_MARKS.other;
 }
 
 function drawRoomMark(ctx: CanvasRenderingContext2D, s: SpriteSheet, r: BuildingRect) {
@@ -128,6 +137,12 @@ function drawRoomMark(ctx: CanvasRenderingContext2D, s: SpriteSheet, r: Building
   else if (m.shape === "triangle") {
     ctx.fillRect(x + 2, y, 1, 1); ctx.fillRect(x + 1, y + 1, 3, 1);
     ctx.fillRect(x, y + 2, 5, 1); ctx.fillRect(x, y + 3, 5, 1);
+  } else if (m.shape === "diamond") {
+    ctx.fillRect(x + 2, y, 1, 1); ctx.fillRect(x + 1, y + 1, 3, 1);
+    ctx.fillRect(x, y + 2, 5, 1); ctx.fillRect(x + 1, y + 3, 3, 1);
+    ctx.fillRect(x + 2, y + 4, 1, 1);
+  } else if (m.shape === "dot") {
+    ctx.fillRect(x + 1, y + 1, 3, 3);
   }
   ctx.restore();
 }

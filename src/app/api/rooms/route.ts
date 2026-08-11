@@ -5,7 +5,7 @@ import { pool } from "@/lib/db";
 
 export async function GET() {
   const { rows } = await pool.query(
-    `SELECT id, name, kind, capacity FROM rooms WHERE deleted_at IS NULL ORDER BY id ASC`,
+    `SELECT id, name, kind, capacity, deco FROM rooms WHERE deleted_at IS NULL ORDER BY id ASC`,
   );
   return NextResponse.json({
     rooms: rows.map((r) => ({
@@ -14,6 +14,8 @@ export async function GET() {
       kind: r.kind === "hall" ? "hall" : "room",
       // 定員。運用で変わるためDBの列から取る（Phase 4.8）
       capacity: Number(r.capacity),
+      // 屋根の印。部屋名からは推測しない（Phase 4.10）
+      deco: r.deco,
     })),
   });
 }
