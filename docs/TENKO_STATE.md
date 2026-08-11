@@ -103,3 +103,4 @@ Phase 5 の直前に実測し、金額が判明した時点でPOが判断する�
 
 - 2026-08-11 初版作成。Phase 0 の実測結果を反映
 - 2026-08-11 Phase 1 のスキーマを確定し Neon で実行。users / rooms / room_members / messages / read_states の5テーブル
+- 2026-08-11 Phase 2 完了。バリアントAを採用し main にマージ。rooms に kind 列を追加し、建物の種別を並び順から独立させた
