@@ -604,8 +604,305 @@ authjs.callback-url : Path=/; HttpOnly; SameSite=Lax
 | 2人目以降の利用者を登録する手順 | **未整備** | いまは `scripts/link-user-email.js` で1行ずつ紐づける。管理画面は Phase 5 の範囲外 |
 | セッションが7日で切れる挙動 | **未検証** | `expires` が7日後になっていることは確認したが、**切れた瞬間の挙動は時間を進めないと見られない**。段階3で `sessions` の行を直接古くして確認する |
 
+---
+
+# 2026-08-13（続き）段階3: `actor.ts` の差し替えと全経路の認証
+
+## A. 作業1-2: `actor.ts` を経由していない経路の一覧（全数検索の結果）
+
+`src/` 全体を機械的に検索した。**利用者を決めている箇所は、以下ですべてである。**
+
+| 場所 | どう決めていたか | 区分 |
+|---|---|---|
+| `src/lib/actor.ts` | `requestedUserId(raw)`。`?user=` / `body.user` を信用。`TENKO_TRUST_USER_PARAM=0` なら固定値 | 本体 |
+| **`src/app/api/rooms/[roomId]/messages/route.ts`** | **独自に `const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1)`** | **actor.ts を経由していない** |
+| `src/app/village-client.tsx` | `devUser()`。URL の `?me=` を読む | 画面側 |
+| `src/app/attendance/page.tsx` | `actorId()`。URL の `?me=` を読む | 画面側 |
+| `src/app/approvals/page.tsx` | `actorId()`。URL の `?me=` を読む | 画面側 |
+
+`src/app/rooms/[id]/page.tsx`（チャット画面）は利用者を決めていなかった（サーバー側の定数に任せていた）。
+
+**actor.ts を経由していなかったのは messages の1経路のみ。** これは段階2の報告で挙げた懸念のとおりだった。
+発言は勤怠の下書きの根拠になるため、ここが漏れると勤怠まで偽装できる。**最初に潰した。**
+
+## B. 差し替えの方針
+
+`requestedUserId(raw)` を廃止し、**引数を取らない** `currentActor()` に置き換えた。
+
+```
+export async function currentActor(): Promise<Actor | null>
+```
+
+- **引数が無いので、リクエストから利用者IDを渡す経路が構文の上で存在しない。**
+  「うっかり `body.user` を渡す」ことが型の上でできない
+- **役割はセッションから取らない。毎回 `users` を引き直す。**
+  セッションに載せた `role` は画面の分岐にしか使わない。降格が即座に効く
+- `deleted_at IS NULL` と `is_demo = false` もここで確認する
+- 書き込みの経路には `assertSameOrigin(req)` を入れた（CSRF対策の2層目。
+  1層目は Cookie の `sameSite=lax`。それに頼らず Origin も確かめる）
+
+## C. 作業3: 全経路の実測（未認証 / なりすまし / 権限）
+
+**1経路ずつ差し替え、その都度 `scripts/attack-phase5-auth.js` で実際に送って確認した。**
+まとめて差し替えてから最後に試す進め方はしていない。
+
+確認用のセッションはDBに直接作る（Auth.js のアダプタが作るのと同じ形）。
+5つの役割（admin / member / 担当の上長 / 無関係な member / 別の上長）で叩き分け、終わったら消す。
+
+| 経路 | 未認証 | なりすまし | 権限 |
+|---|---|---|---|
+| `/api/me` | **401** | `?user=2` を添えても `id=1`（自分）が返る | member でも自分の分は取れる（200） |
+| `/api/village` | **401** | `?user=他人` の応答が自分の応答と**完全に同一** | — |
+| `/api/notes`（自分） | **401** | `?user=admin&mine=1` でも自分の分しか返らない | — |
+| `/api/notes` PUT / DELETE | **401** | member が `user=admin` を添えても admin の note は**変わらない** | — |
+| `/api/notes`（全員分） | 200（意図どおり開放。段階4で絞る） | — | — |
+| `/api/announcements` GET | **401** | — | — |
+| `/api/announcements` POST | **401** | `body.user=admin` を添えても **403** | member **403** / manager **403** / admin 201 |
+| `/api/rooms/1/messages` GET | **401** | — | — |
+| `/api/rooms/1/messages` POST | **401**（かつ messages は 11→11 で増えない） | `user`/`userId` に admin を添えても、**保存された `user_id` はセッションの人（2）** | — |
+| `/api/attendance/drafts` | **401** | `?user=他人` の応答が同一。他人の下書きの混入 **0件** | — |
+| `/api/attendance/drafts/[id]` | **401** | 他人の下書きを確定しようとして **409**、`status` は `pending` のまま | — |
+| `/api/attendance/approvals` | **401** | `?user=admin` を添えても **403** | member **403** |
+| `/api/attendance/approvals/[id]` | **401**（`status` は `submitted` のまま） | — | 本人 **403** / 無関係 member **403** / 別の上長 **403** / **担当の上長のみ 200** |
+| `/api/attendance/corrections` GET | **401** | `?user=admin` の応答が同一 | — |
+| `/api/attendance/corrections` POST | **401** | — | — |
+| `/api/attendance/anomalies` | **401** | `?user=admin` を添えても `actor.id` は自分（4） | `?target=他人` で **403** |
+| `/api/attendance/monthly` | **401** | — | 無関係な member が他人の分を取ると **403**。自分の分は 200 |
+| `/api/rooms` | 200（開放。建物を描くのに要る） | — | — |
+| `/api/users` | 200（開放。表示名だけ。**email を含まないことを確認**） | — | — |
+
+```
+結果: OK 45 件 / 通ってしまった 0 件
+```
+
+**通ってしまったものは1件も無い。** 差し替えの途中でも、各段階で通ったものは無かった。
+
+## D. 作業1-3: `verify-auth-coverage.js`
+
+人の注意力に頼らず、機械で抜けを見つける。`scripts/` に置き、`src/` からは参照していない。
+
+落ちる条件:
+
+1. `src/` に `SELECT *` / `RETURNING *` がある
+2. API の経路が `currentActor()` も「開放」の宣言も持っていない
+3. 書き込み（POST/PUT/DELETE/PATCH）の経路が `currentActor()` を呼んでいない
+4. 書き込みの経路が `assertSameOrigin()` を呼んでいない
+5. `requestedUserId` / `TENKO_DEV_USER_ID` / `TENKO_TRUST_USER_PARAM` / `?me=` / `?actor=` / `devUser()` が残っている
+
+**開放してよい経路はスクリプトの中に一覧で持つ。書かれていないものは閉じているのが既定。**
+新しいAPIを足したとき、どちらも書かなければ落ちる。
+
+実行結果:
+
+```
+調べたファイル: 39 件（うち API の経路 15 件）
+未認証で開放している経路（既定は閉じている）:
+  - src/app/api/rooms/route.ts
+  - src/app/api/users/route.ts
+  - src/app/api/notes/route.ts
+  - src/app/api/auth/[...nextauth]/route.ts
+
+  [認証] src/app/api/announcements/route.ts
+  [認証] src/app/api/attendance/anomalies/route.ts
+  [認証] src/app/api/attendance/approvals/route.ts
+  [認証] src/app/api/attendance/approvals/[id]/route.ts
+  [認証] src/app/api/attendance/corrections/route.ts
+  [認証] src/app/api/attendance/drafts/route.ts
+  [認証] src/app/api/attendance/drafts/[id]/route.ts
+  [認証] src/app/api/attendance/monthly/route.ts
+  [開放] src/app/api/auth/[...nextauth]/route.ts
+  [認証] src/app/api/me/route.ts
+  [開放] src/app/api/notes/route.ts
+  [開放] src/app/api/rooms/route.ts
+  [認証] src/app/api/rooms/[roomId]/messages/route.ts
+  [開放] src/app/api/users/route.ts
+  [認証] src/app/api/village/route.ts
+
+問題なし
+```
+
+`SELECT *` は 0 件。段階1で確認したとおり、アプリ側は列を明示している。
+
+## E. 作業2: `village-client.tsx` の差し替え
+
+**`devUser()` は削除した。** 参照を減らしただけではない。関数そのものが無い。
+`attendance/page.tsx` と `approvals/page.tsx` の `actorId()` も同様に削除した。
+
+確認（`verify-auth-coverage.js` の検査5に含めてある）:
+
+```
+src/ 全体で devUser / actorId / ?me= の読み取り: 0 件
+```
+
+誰として村にいるかは `page.tsx`（Server Component）が `currentActor()` で決め、props で渡す。
+渡すのは `{ id, name, role, colorIndex }` だけ。**色も利用者IDから決める**（画面側で選ばせない）。
+
+未ログインなら `null` を渡す。画面側は `isGuest` として扱い、
+自分の情報を取る要求（`/api/village`・`/api/announcements`・`/api/notes?mine=1`）を出さず、
+WebSocket に在席の申告（`presence.set`）も送らない。
+
+**ただし、これは体験のためであって担保ではない。** WS を直接叩けば在席は申告できる（段階6で塞ぐ）。
+
+## F. 作業3の副産物: チャット画面で見つけた不具合
+
+`src/app/rooms/[id]/page.tsx` の送信の待ち行列に、こういう行があった。
+
+```ts
+// 4xx は送り直しても通らないので行列から外す。5xx と通信断は残して再送する
+ok = res.ok || (res.status >= 400 && res.status < 500);
+```
+
+認証が入るまで 401 は返らなかったので、これで正しかった。
+**認証が入った後は、ログインしていない人が書いた文が「送り直しても通らない」と判定され、黙って消える。**
+
+401 だけを別扱いにし、行列に残したまま「ログインが必要です（書いた N 件は消さずに残してあります）」を出す形にした。
+
+**認証を入れることで、認証と直接関係のない箇所の前提が崩れた例。** 他にも同種の箇所がないか、段階4で見る。
+
+## G. 未ログインで村を開いたときの挙動（段階4の土台）
+
+実機で確認した（スクリーンショットあり）。
+
+| | ログイン後 | 未ログイン |
+|---|---|---|
+| ヘッダ | 表示名（テスト太郎） | **「見るだけ（ログインしていません）」＋ ログインボタン** |
+| 村・建物・地面・装飾 | 見える | **見える** |
+| 自分のアバター | 出る（金の枠・「あなた」） | **出ない** |
+| 噴水 | 「お知らせ 5」（未読の数） | 「お知らせ」（**数は出ない。中身も見えない**） |
+| 勤怠の印 | 「勤怠 1」 | 出ない |
+| メンバー | 1/56 | 0/56 |
+
+**村の絵は完全に描かれる。** 建物・道・噴水・装飾はすべて見える。
+いま人がいないのは、デモ用の利用者がまだ接続を持たないため（**段階5で常設する**）。
+
+段階4で残っている作業:
+- `/api/notes` をデモ用の利用者の分だけに絞る
+- 噴水を押したときの「ログインすると読めます」
+- `TENKO_PUBLIC_VIEW=0` の切り替え
+- `proxy.ts`（体験のための層。**担保にはしない**）
+
+## H. 作業4-1: `verify-phase4-permissions.js` を直した
+
+2つ直した。
+
+1. **セッションで叩く形にした**（`?user=` / `body.user` が読まれなくなったため）
+2. **何度実行しても同じ結果になるようにした。**
+   以前は固定のUUIDで投稿を作ってから `messages.user_id` を書き換えており、
+   2回目の実行で `(user_id, client_msg_id)` の一意制約に当たって途中で止まっていた。
+   UUID を毎回生成し、**部下として発言し部下として確定する**（後から書き換えない）形にした
+
+**3回続けて実行し、同じ結果・exit 0 を確認した。**
+
+```
+=== 承認を試みる（記録は部下のもの）===
+  本人(member)                   -> status=403 記録=submitted 「承認できるのは manager か admin のみです」
+  無関係な member                  -> status=403 記録=submitted 「承認できるのは manager か admin のみです」
+  別の上長(manager・担当外)            -> status=403 記録=submitted 「この利用者の承認者ではありません」
+  担当の上長(manager)               -> status=200 記録=approved
+
+=== 一覧の見え方 ===
+  無関係な member          -> status=403 件数=-
+  別の上長                 -> status=200 件数=0
+  担当の上長                -> status=200 件数=0
+  管理者(admin)           -> status=200 件数=1
+
+=== 未認証で一覧を取れるか ===
+  Cookie なし -> status=401 {"error":"ログインが必要です"}
+
+=== 他人の記録を本人として再提出できるか（なりすまし）===
+  無関係な member が再提出 -> status=403 {"error":"自分の記録ではありません"}
+```
+
+## I. 作業4-2: 「お試し版」の帯をどうしたか
+
+**差し替えた。** 消さずに、意味を変えた。
+
+- 段階2まで: 「お試し版・ログインなし（誰にでもなりすませます）」を**常時**表示
+- 段階3から: **未ログインのときだけ**「見るだけ（ログインしていません）」＋ログインボタン。
+  ログイン後は表示名を出す
+
+判断の理由:
+
+- 認証が入った以上、「誰にでもなりすませます」は**事実と違う**。事実でない警告は、他の警告の信用も落とす
+- ただし帯そのものを消すと、未ログインの人が「なぜ自分のアバターが出ないのか」が分からない。
+  **状態を示す表示としては残す必要がある**
+- 段階4で見るだけモードを整えるまで、未ログインの見え方は未確定である。
+  そのため文面は「見るだけ」という**事実の記述**に留め、価値判断（お試し版・本番では使えない）を外した
+
+**WS の穴（在席の偽装）はまだ残っている。** これは画面の帯ではなく README に書いた
+（利用者に見せる情報ではなく、開発者が知るべき情報のため）。
+
+## J. 破壊試験（新規2項目を含む）
+
+| 試験 | 結果 | 出典 |
+|---|---|---|
+| WebSocket 経由で投稿を保存できない | **保たれている**（messages 20 → 20） | `attack-presence.js` |
+| 承認済みの勤怠記録が変更できない | **保たれている**（UPDATE×2・DELETE すべて例外。行は残存） | `verify-freeze.js` |
+| 確定・却下済みの下書きが変更できない | **保たれている**（同上） | `verify-freeze.js` |
+| 他人の勤怠記録を承認できない（4通り） | **保たれている**（本人403 / 無関係403 / 別の上長403 / 担当の上長のみ200） | `verify-phase4-permissions.js` |
+| 他人の在席状態を変更できない | **まだ通る（S6）。段階6で塞ぐ** | `attack-presence.js` |
+| 他人のアバターを移動できない | **保たれている**（被害者は動かない） | `attack-phase48.js` |
+| `member` がお知らせを書き込めない | **保たれている**（member 403 / manager 403 / admin 201） | `attack-phase5-auth.js` |
+| **他人になりすまして発言できない（新規）** | **保たれている。** `user`/`userId` に他人のIDを添えても、保存された `user_id` はセッションの人 | `attack-phase5-auth.js` |
+| **未認証で書き込み系のAPIを叩けない（新規）** | **保たれている。** POST/PUT/DELETE すべて 401。投稿は保存もされない | `attack-phase5-auth.js` |
+
+あわせて確認できたもの（回帰）: 定員超過で建物に入れない（4/4で断り）/
+呼びかけの連打制限（15回中0回通過）/ 不正な座標の扱い / 呼びかけに名前が含まれない。
+
+### 段階3で変わった破壊試験の結果が1つある
+
+`attack-presence.js` の「他人の『今日やること』を書き換えられるか」が
+**200 → 401 に変わった**（書き換えられなくなった）。スクリプト内の説明文はまだ
+`TENKO_TRUST_USER_PARAM=0 にすれば塞がる` と書いてあるが、この変数自体が廃止された。
+測定結果は正しいので、文面の更新は段階4でまとめて行う。
+
+### 既存の攻撃スクリプトのうち、HTTP を叩く部分について
+
+`attack-phase45.js` と `attack-phase49.js` は `?user=` / `body.user` で誰かを名乗る作りのため、
+**HTTP を叩く部分は今後 401 / 403 しか返さない**（＝守られていることの確認にはなるが、
+本来調べたかった「その先の挙動」は調べられない）。
+同じ範囲は `attack-phase5-auth.js` と `verify-phase4-permissions.js` がセッションで確認しており、
+そちらは通っている。**書き換えは段階4に回す**（今回の範囲外の変更を混ぜないため）。
+
+## K. 段階4以降に向けて分かったこと・懸念
+
+1. **認証を入れると、認証と関係のない箇所の前提が崩れる**（F節のチャットの401）。
+   段階4で「4xx をまとめて扱っている箇所」を全数検索する
+2. **ログアウトの導線が無い。** いまブラウザからログアウトする手段が画面に無く、
+   確認のためにDBのセッション行を消した。段階4で付ける
+3. `/api/notes` の全員分は、いま**全員の業務内容が未認証で読める**。
+   POの判断（デモ用の利用者の分だけ）は**まだ実装していない**。段階4の最初にやる
+4. 未ログインの村に人が1人もいない。デモ用の利用者の常設（段階5）まで、
+   見るだけモードは「空っぽの村」に見える。**段階4と段階5は続けて行うほうがよい**
+5. `proxy.ts` はまだ作っていない。作らなくても各経路で検証しているため穴は無い。
+   段階4で「体験のための層」として入れる
+
+## L. この作業で変わったDBの状態（POに申し送り）
+
+| 変わったもの | 内容 |
+|---|---|
+| `sessions` | **0件。** 未ログインの見え方を確認するため、ブラウザのセッションを消した。**POは再ログインが必要**（`/login` から1クリック） |
+| `users`「検証 部下」等5人 | 確認スクリプトが役割と上長を設定し直している（従来どおり） |
+| `attendance_records` | 確認用の記録が数件増えた（対象は「検証 部下」。承認済みは消せないため残る） |
+| `messages` | 確認用の投稿が数件増えた |
+
+## M. 現時点で答えを持たない事項（更新）
+
+| 事項 | 区分 | 内容 |
+|---|---|---|
+| WebSocket の在席の偽装 | **既知の穴（S6）** | 段階6で塞ぐ。設計は済んでいる（入場券方式）が未実装 |
+| セッションが7日で切れた瞬間の挙動 | **未検証** | `expires` が7日後になることは確認済み。切れた瞬間は時間を進めないと見られない。`sessions` の行を古くして試すのは段階4に持ち越した |
+| 本番（別ドメイン・https）での Cookie の挙動 | **未検証** | ローカルでは再現しない |
+| Vercel → Neon のセッション確認の実遅延 | **要実測** | `currentActor()` は毎回 `auth()`（2クエリ）＋ `users` の1クエリを引く。**1リクエストあたり3クエリになった**。ローカルでは体感差が無いが、本番で測る必要がある |
+| `assertSameOrigin` が Vercel の背後で正しく働くか | **仮説** | `Origin` と `Host` を比べている。プロキシが `Host` を書き換える構成では誤判定しうる。本番デプロイ時に確認する |
+| 4xx をまとめて扱っている他の箇所 | **未調査** | F節と同じ形の不具合が他にある可能性。段階4で全数検索する |
+
 ## 12. 変更ログ
 
 - 2026-08-13 段階0〜2。DDL 15文を実行。Auth.js v5 を導入。**ログインの実機確認は認証情報待ち**
 - 2026-08-13 環境変数を確認（変数名の食い違いを1件修正）。セッションから email を落とし、
   実測中に見つけた **sessionToken の露出**も直した。段階2の5項目をすべて実測で確認した
+- 2026-08-13 段階3。`requestedUserId` を廃止し、引数を取らない `currentActor()` に置き換えた。
+  全13経路 + 画面3つを1つずつ差し替え、その都度攻撃を送って確認した（45件すべてOK）。
+  `devUser()` と `actorId()` を削除。`verify-auth-coverage.js` で抜けを機械検査する形にした。
+  **WSの在席の偽装（S6）は残っている。段階6で塞ぐ**
