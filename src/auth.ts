@@ -121,24 +121,42 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         `SELECT id, display_name, role FROM users WHERE id = $1 AND deleted_at IS NULL`,
         [user.id],
       );
+      // **session も user も展開しない（`...session` を書かない）。**
+      //
+      // 理由が2つある。どちらも 2026-08-13 に実機で確認した:
+      //
+      //  1. DB方式では、この session はセッションの行そのもの（AdapterSession）である。
+      //     展開すると **sessionToken が /api/auth/session の応答にそのまま載る**。
+      //     Cookie を httpOnly にしている意味が薄れる（XSS があれば fetch で読めてしまう）。
+      //     実際に載っていたのを実測して見つけた
+      //  2. 既定のセッションには本人の email が入っており、展開すると一緒に載る。
+      //     画面で使う予定が無く、将来セッションをログに出す実装が入ったときに混ざる（PO判断）
+      //
+      // したがって、**外に出す項目はここで列挙する**。必要になった時点で足せばよい。
+      // expires は Auth.js が使う（クライアント側の再取得の判断）ので残す。
+      const base = { expires: session.expires };
+
       if (rows.length === 0) {
         // 削除された利用者。セッション行が生きていても中には入れない。
         // id=0 は「利用者なし」を表す。担保はここではなく、
         // API側が users を引き直して弾くこと（段階3）にある
         return {
-          ...session,
-          user: { ...session.user, id: 0, displayName: "", role: "" },
+          ...base,
+          user: { id: 0, displayName: "", role: "", name: null, image: null },
         } as unknown as Session;
       }
+
       // Auth.js の型では user.id が文字列（AdapterUser）になっているため、
       // 数値に直した形へは型の変換が要る。値の正しさは session コールバックのこの1か所で担保する
       return {
-        ...session,
+        ...base,
         user: {
-          ...session.user,
           id: Number(rows[0].id),
           displayName: String(rows[0].display_name),
           role: String(rows[0].role),
+          // 表示に使う可能性があるものだけ残す。email は載せない
+          name: String(rows[0].display_name),
+          image: session.user?.image ?? null,
         },
       } as unknown as Session;
     },

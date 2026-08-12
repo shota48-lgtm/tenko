@@ -1,4 +1,6 @@
 // セッションに載せる tenko 固有の情報の型。
+// email は載せない（auth.ts の session コールバックで意図的に外している）。
+// 型の上では DefaultSession["user"] に残るが、値は常に undefined になる。
 // id は数値。pg が bigint を文字列で返すため、auth.ts の session コールバックで Number() に通している
 import type { DefaultSession } from "next-auth";
 

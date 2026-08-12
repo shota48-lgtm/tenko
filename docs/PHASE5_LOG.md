@@ -364,6 +364,248 @@ Phase 5 の変更が原因ではない（`users` に列を足しただけで `me
 
 ---
 
+---
+
+# 2026-08-13（続き）環境変数の確認と、段階2の実測
+
+段階0の認証情報がPOによって設定されたため、保留していた実測を行った。
+
+## A. 環境変数
+
+`tenko\.env.local` の状態（**値は記録しない。名前と有無のみ**）:
+
+| 変数名 | 有無 |
+|---|---|
+| `DATABASE_URL` | あり |
+| `AUTH_SECRET` | あり |
+| `AUTH_GOOGLE_ID` | あり |
+| `AUTH_GOOGLE_SECRET` | あり |
+| `TENKO_ADMIN_EMAILS` | あり（**名前を直した。下記**） |
+
+### 変数名の食い違いを1件直した
+
+POが設定したのは `TENKO_ADMIN_EMAIL`（単数）で、`src/auth.ts` が読むのは
+**`TENKO_ADMIN_EMAILS`（複数形）**だった。このままでは管理者の昇格が動かない。
+
+**値には触れず、行の先頭の変数名だけを書き換えた**（`TENKO_ADMIN_EMAIL=` → `TENKO_ADMIN_EMAILS=`）。
+書き換えの前後で、5つの変数すべてについて値の文字数が変わっていないことを確認している。
+
+複数形を正とした理由: カンマ区切りで複数の管理者を書ける設計にしてあり、
+設計書・実装・このログの全てが複数形で書かれているため。
+単数形に合わせるより、環境変数側の1語を直す方が影響が小さい。
+
+### `npx auth secret` の書き込み先
+
+**`tenko\.env.local` に正しく書かれていた。** 他の場所には作られていない。
+
+開発ルート配下の `.env` 系ファイルを全数検索した結果:
+
+```
+ablens\.env.example / ablens\.env.local
+ec-app\.env / ec-app\.env.example
+rag-kitei-qa\.env / rag-kitei-qa\.env.example
+reservation-app\.env
+style-diagnosis-app\.env.local
+tenko\.env.local          ← 今回のもの
+```
+
+**開発ルート直下には無い。** 他は全て隣接プロジェクトのもので、**一切触っていない**。
+
+`AUTH_SECRET` の中身の形式だけ確認した（値は見ていない）:
+83文字、引用符なし、空白なし、`#` なし、英数字と `+/=_-` のみ。
+`npx auth secret` の既定（44文字）より長いが、秘密鍵としては問題ない。
+
+### `.gitignore`
+
+```
+.gitignore:34:.env*    .env.local     ← git check-ignore -v の出力
+git ls-files .env.local → error: pathspec did not match any file(s) known to git（＝未追跡）
+git log --all -- .env .env.local .env* → なし（＝履歴に一度も入っていない）
+```
+
+**無視されており、追跡されておらず、履歴にも存在しない。**
+
+## B. セッションから email を落とした
+
+`session` コールバックで `...session.user` の展開をやめ、**外に出す項目を列挙する形**にした。
+
+`session.user.email` を参照している箇所は `src` 全体に**0件**だったため、他は壊れていない。
+`npx tsc --noEmit` は 0 で通る。
+
+### 実測中に見つけた、もっと重い問題（自分の実装のバグ）
+
+`/api/auth/session` の応答を実際に見たところ、**セッショントークンがそのまま載っていた**。
+
+```json
+{"id":"1","userId":"1","expires":"...","sessionToken":"c52e00e2-…","user":{…}}
+```
+
+原因: DB方式では `session` コールバックが受け取る `session` は**セッションの行そのもの**であり、
+`...session` と展開して返すと `sessionToken` が応答に含まれる。
+
+危険度: Cookie を持つ本人にしか返らないため、他人には漏れない。
+しかし **Cookie を httpOnly にしている意味を薄める**。
+XSS が入った場合、`fetch("/api/auth/session")` でトークンを読み出せてしまう。
+httpOnly はまさにそれを防ぐための設定である。
+
+対処: `...session` の展開もやめ、`expires` と `user` だけを組み立てて返すようにした。
+
+```json
+{"expires":"2026-08-19T21:02:13.850Z","user":{"id":1,"displayName":"テスト太郎","role":"admin","name":"テスト太郎","image":null}}
+```
+
+**コードを読んでいるだけでは気づかなかった。** 応答を実際に見たから見つかった。
+
+この応答からは同時に3つのことが確認できる:
+
+- `email` が載っていない（POの判断どおり）
+- `id` が**数値の 1**（文字列の `"1"` ではない。`Number()` が効いている）
+- `expires` が **2026-08-19**（ログインは 08-13。**7日後。`maxAge` が効いている**）
+
+## C. 段階2の実測（5項目）
+
+実測の順序を工夫した。**先に「まだ登録されていない状態」で試す**ことで、
+同じアカウントで「拒否」と「成功」の両方を確認できる。
+
+### 実測前のDBの状態
+
+```
+[ログイン前] users=56(email入り 0 / 最大id 56) accounts=0 sessions=0 verification_token=0
+```
+
+### 2. 未登録のアドレスで拒否されること（最重要）
+
+`users` の誰にもメールアドレスが入っていない状態で、Google でログインした。
+
+- Google のアカウント選択 → 同意画面 → 「次へ」
+- 結果: **`http://localhost:3000/login?error=AccessDenied` に戻った。**
+  画面には「このアプリは、あらかじめ登録された方だけが使えます」が出た
+
+サーバのログ:
+
+```
+[auth][error] AccessDenied: AccessDenied.
+    at handleAuthorized (…@auth_core…:1376:28)
+    at async Module.callback (…)
+GET /api/auth/callback/google?… 302
+```
+
+**`handleAuthorized`（= signIn コールバック）で止まっている。**
+
+拒否の直後のDB:
+
+```
+[未登録での拒否のあと] users=56(email入り 0 / 最大id 56) accounts=0 sessions=0 verification_token=0
+```
+
+**4つの表すべてで1行も増えていない。最大idも 56 のまま。**
+
+設計書で「実装の順序から、そうなるはず」としていた
+（`handleAuthorized` が `handleLoginOrRegister` より前に走る）ことが、**実測で裏付けられた**。
+
+### 4 → 1 → 3. 既存の行に紐づけてログインし、admin になること
+
+既存の `users` の1行（**id=1「テスト太郎」/ role=member**）にアドレスを紐づけた
+（`scripts/link-user-email.js`。アドレスは `.env.local` から読み、画面には出さない）。
+
+```
+変更前: id=1 テスト太郎 role=member email=なし is_demo=false
+変更後: id=1 テスト太郎 role=member email=あり
+```
+
+id=1 を選んだ理由: `TENKO_DEV_USER_ID` の既定であり、村の既存データが最も多い行のため。
+**role は member のままにした。** admin へ変えるのは `signIn` の仕事であり、
+先に admin にしてしまうと昇格が起きたのか元からそうだったのか区別できないため。
+
+この状態でもう一度ログインした結果:
+
+- **同意画面は出ず、そのまま `http://localhost:3000/`（村）に戻った** → ログイン成功
+- サーバのログ: `[auth] id=1 を admin にした（TENKO_ADMIN_EMAILS による）`
+
+```
+[ログイン成功のあと] users=56(email入り 1 / 最大id 56) accounts=1 sessions=1 verification_token=0
+  id=1 テスト太郎 role=admin email=あり is_demo=false
+```
+
+読み取れること:
+
+| # | 項目 | 結果 |
+|---|---|---|
+| 1 | Google でログインできる | **できた**（村に戻った） |
+| 3 | 環境変数で指定したアドレスが `admin` になる | **なった**（member → admin。ログにも1行出た） |
+| 4 | 既存の `users` に紐づく | **紐づいた。`users` は 56 のまま増えていない**（最大idも 56）。`accounts` が1行できて既存の行に繋がった |
+
+### 5. `OAuthAccountNotLinked`
+
+**出なかった。** `allowDangerousEmailAccountLinking: true` が意図どおり働き、
+既存の `users` の行に `accounts` が紐づいた（`users` が増えていないことがその証拠）。
+
+設計書で「仮説」としていた項目は、**「この設定を付けた状態では出ない」ことが実測で確定した**。
+外した場合に出るかどうかは**未検証のまま**である（確認のために危険側の設定へ倒す価値は無いと判断した）。
+
+### Cookie の実測
+
+`Set-Cookie` を実際に見た:
+
+```
+authjs.csrf-token   : Path=/; HttpOnly; SameSite=Lax
+authjs.callback-url : Path=/; HttpOnly; SameSite=Lax
+```
+
+`Secure` が付いていないのは `http://localhost` のため（**本番の https では自動で付く**）。
+**ローカルでは再現しない項目**であり、本番デプロイ時に確認する必要がある。
+
+### 実データが入った状態での、漏れの再検査
+
+`users` に**実際のメールアドレスが1件入った状態**で、13経路の応答をもう一度検査した。
+
+```
+漏れ・失敗: 0 件 / 13 経路
+```
+
+最初の検査は「DBに email が1件も無い状態」だったため、
+**値が入ってからの再検査で初めて意味のある確認になった。**
+
+## D. ローカルでは再現しないこと（再掲・追加）
+
+- **Cookie の `Secure` 属性**: http のため付かない。本番でのみ確認できる
+- **別ドメイン間の Cookie**: Vercel と Railway に分かれたときの挙動（段階6の論点）
+- **`AUTH_URL` の自動検出**: Vercel 上でのみ効く経路がある
+- **Google の同意画面**: 2回目以降は出ない。初回だけの挙動は、別のアカウントでしか再確認できない
+
+## E. この作業で変わったDBの状態（POに申し送り）
+
+| 変わったもの | 内容 | 戻し方 |
+|---|---|---|
+| `users` id=1「テスト太郎」 | `email` が入り、**role が member → admin になった** | `node scripts/link-user-email.js 1 --unlink` と `UPDATE users SET role='member' WHERE id=1` |
+| `accounts` | 1行（id=1 と Google の紐づけ） | `DELETE FROM accounts WHERE "userId"=1` |
+| `sessions` | 1行（**いまブラウザがログイン状態**） | `DELETE FROM sessions` でログアウトさせられる |
+
+**id=1 が admin になった点に注意。** 噴水のお知らせを書ける人が1人増えている。
+別の行を本人にしたい場合は、上の戻し方で外してから紐づけ直せる。
+
+## F. 段階3に向けて新たに分かったこと
+
+1. **`session` コールバックで展開してはいけない**。DB方式では `session` はセッションの行そのもの。
+   段階3で `requireActor()` を書くときも、**セッションの中身をそのまま返す実装にしない**
+2. ログイン後も村は今までどおり動いた（既存のAPIは `actor.ts` のままで無変更のため）。
+   画面には「お試し版・ログインなし（誰にでもなりすませます）」の帯が出たままである。
+   **段階3でこの帯を外す**（外す前に外すと、実態と表示が食い違う）
+3. `/api/me` が role=admin を返すようになったため、噴水の書き込み欄が出る。
+   段階3以降の確認では「id=1 は admin である」を前提にすること
+
+## G. 現時点で答えを持たない事項（更新）
+
+| 事項 | 区分 | 内容 |
+|---|---|---|
+| `OAuthAccountNotLinked` が設定を外すと出るか | **未検証** | 付けた状態では出ないことは確定した。外した場合は試していない |
+| 本番（別ドメイン・https）での Cookie の挙動 | **未検証** | ローカルでは再現しない。段階6の spike と本番デプロイで確認する |
+| Vercel → Neon のセッション確認の実遅延 | **要実測** | ローカルの往復では意味のある数字にならない。段階3の完了時に本番相当で測る |
+| 2人目以降の利用者を登録する手順 | **未整備** | いまは `scripts/link-user-email.js` で1行ずつ紐づける。管理画面は Phase 5 の範囲外 |
+| セッションが7日で切れる挙動 | **未検証** | `expires` が7日後になっていることは確認したが、**切れた瞬間の挙動は時間を進めないと見られない**。段階3で `sessions` の行を直接古くして確認する |
+
 ## 12. 変更ログ
 
 - 2026-08-13 段階0〜2。DDL 15文を実行。Auth.js v5 を導入。**ログインの実機確認は認証情報待ち**
+- 2026-08-13 環境変数を確認（変数名の食い違いを1件修正）。セッションから email を落とし、
+  実測中に見つけた **sessionToken の露出**も直した。段階2の5項目をすべて実測で確認した
