@@ -34,6 +34,13 @@ const presence = new Map();   // ws -> { id, name, colorIndex, state, baseState,
 let rooms = [];
 let roomsLoadedAt = 0;
 
+// デモ用の利用者（Phase 5 段階5）。
+//
+// 接続を持たないが、常に村にいる人。村が空だと、見るだけで開いた人に何も伝わらないため。
+// **デモ用のプロセスは動かさない。** Railway の枠を消費し、落ちれば村が空になる。
+// 代わりに、この一覧をアプリから60秒ごとに取り、実際の接続に足して配る。
+let demo = [];
+
 async function loadRooms() {
   try {
     const res = await fetch(API + "/api/rooms");
@@ -46,18 +53,40 @@ async function loadRooms() {
     console.log("[rooms] 取得できなかった: " + e.message + "（建物には入れない扱いにする）");
   }
 }
+
+async function loadDemo() {
+  try {
+    const res = await fetch(API + "/api/demo-presence");
+    if (!res.ok) throw new Error("status " + res.status);
+    const d = await res.json();
+    // 取れたときだけ入れ替える。取れなかったら前の内容を使い続ける
+    // （一時的に取れないだけで村が空になると、見るだけの人には壊れて見える）
+    if (Array.isArray(d.demo)) {
+      demo = d.demo;
+      console.log("[demo] " + demo.length + " 人を村に出す");
+    }
+  } catch (e) {
+    console.log("[demo] 取得できなかった: " + e.message + "（前の内容をそのまま使う）");
+  }
+}
+
 loadRooms();
-setInterval(loadRooms, 60_000);
+loadDemo();
+setInterval(() => { loadRooms(); loadDemo(); }, 60_000);
 
 function capacityOf(roomId) {
   const r = rooms.find((x) => Number(x.id) === Number(roomId));
   return r && Number.isFinite(Number(r.capacity)) ? Number(r.capacity) : 0;
 }
-// その部屋にいる人数。同じ利用者の複数接続は1人として数える
+// その部屋にいる人数。同じ利用者の複数接続は1人として数える。
+// デモ用の利用者も数える。数えないと、村の見た目（建物の下の帯）と定員の判定が食い違う
 function occupantsOf(roomId, exceptUserId) {
   const ids = new Set();
   for (const p of presence.values()) {
     if (Number(p.roomId) === Number(roomId) && p.id !== exceptUserId) ids.add(p.id);
+  }
+  for (const d of demo) {
+    if (Number(d.roomId) === Number(roomId) && d.id !== exceptUserId) ids.add(d.id);
   }
   return ids.size;
 }
@@ -72,6 +101,18 @@ function presenceList() {
     if (!prev || (p.updatedAt || 0) >= (prev.updatedAt || 0)) byUser.set(p.id, p);
   }
   const out = [];
+  // デモ用の利用者を先に入れる。同じIDで実際の接続があれば、そちらで上書きされる
+  // （実在の人が優先。デモ用と実在の人が同じIDになることは無いが、念のため）
+  for (const d of demo) {
+    if (byUser.has(d.id)) continue;
+    out.push({
+      id: d.id, colorIndex: d.colorIndex, state: d.state, roomId: d.roomId,
+      talk: d.talk, x: d.x, y: d.y, connections: 0,
+      // 画面が「この人はデモ用」と分かるようにする。
+      // 呼びかけ・チャットの案内を変えるために使う（返事が来ないのを不具合に見せない）
+      demo: true,
+    });
+  }
   for (const p of byUser.values()) {
     let connections = 0;
     for (const q of presence.values()) if (q.id === p.id) connections++;
@@ -123,7 +164,8 @@ function freeSpot() {
     if (geo.buildingAt(rooms, s.x, s.y)) continue;
     if (geo.onFountain(s.x, s.y)) continue;
     let taken = false;
-    for (const p of presence.values()) {
+    // デモ用の利用者の上にも置かない。重なると、下になった人を選べなくなる
+    for (const p of [...presence.values(), ...demo]) {
       if (Math.abs(p.x - s.x) < geo.PERSON_SIZE && Math.abs(p.y - s.y) < geo.PERSON_SIZE) { taken = true; break; }
     }
     if (!taken) return s;
@@ -137,7 +179,7 @@ function nudge(self, at) {
   const overlaps = (x, y) => {
     // 噴水の上には立てない。乗るとお知らせが押せなくなる
     if (geo.onFountain(x, y)) return true;
-    for (const q of presence.values()) {
+    for (const q of [...presence.values(), ...demo]) {
       if (q.id === self.id) continue;
       if (Math.abs(q.x - x) < geo.PERSON_SIZE * 0.7 && Math.abs(q.y - y) < geo.PERSON_SIZE * 0.7) return true;
     }
@@ -311,6 +353,16 @@ wss.on("connection", (ws, req) => {
       if (!Number.isInteger(to) || to <= 0 || to === from.id) return;
       const limited = canInvite(ws, to);
       if (limited) { ws.send(JSON.stringify({ type: "call.denied", reason: limited })); return; }
+      // デモ用の利用者には呼びかけられない。
+      // 「返事が来ない」ではなく「返事をしない人である」と伝える。
+      // 黙って何も起きないと、呼びかけの機能が壊れているように見える（Phase 5 段階5）
+      if (demo.some((d) => d.id === to)) {
+        ws.send(JSON.stringify({
+          type: "call.denied",
+          reason: "この人は村の様子を見せるために置いてあるデモの利用者です。返事はしません",
+        }));
+        return;
+      }
       const targets = socketsOf(to);
       if (targets.length === 0) {
         ws.send(JSON.stringify({ type: "call.denied", reason: "相手は村にいません" }));
