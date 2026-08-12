@@ -269,15 +269,41 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
     return () => clearTimeout(t);
   }, [loadNotes, loadVillage, loadAnns, router, isGuest]);
 
-  // WebSocket。在席・位置・呼びかけを配る
+  // WebSocket。在席・位置・呼びかけを配る。
+  //
+  // Phase 5 段階6: 村に自分を出すには**入場券**が要る。
+  //   券は同一オリジンの POST /api/ws-ticket で取り、
+  //   new WebSocket(url, ["tenko.v1", "ticket." + 券]) の形で渡す。
+  //   ブラウザは独自のヘッダを送れず、別ドメインの ws-server には Cookie も届かないため。
+  //
+  //   **未ログインの人は券を取りに行かない**（401 を無駄に踏まない）。券なしで繋ぎ、
+  //   村を見るだけになる。券が取れなかった場合も同じ（村が見えなくなるより良い）。
   useEffect(() => {
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let delay = 1000;
+    // 券は使い捨て。繋ぎ直すたびに取り直す
+    const getTicket = async (): Promise<string | null> => {
+      if (isGuest) return null;
+      try {
+        const res = await fetch("/api/ws-ticket", { method: "POST" });
+        if (!res.ok) {
+          if (res.status === 401) setSessionLost(true);
+          return null;
+        }
+        const d = await res.json();
+        return typeof d.ticket === "string" ? d.ticket : null;
+      } catch { return null; }
+    };
 
-    const connect = () => {
+    const connect = async () => {
       setConn("再接続中");
-      const ws = new WebSocket(WS_URL);
+      const ticket = await getTicket();
+      if (closed) return;
+      // 券が無くても "tenko.v1" は必ず送る。
+      // protocols を1つも送らないと、サーバの handleProtocols が呼ばれない（実測）
+      const protocols = ticket ? ["tenko.v1", "ticket." + ticket] : ["tenko.v1"];
+      const ws = new WebSocket(WS_URL, protocols);
       wsRef.current = ws;
       ws.onopen = () => {
         delay = 1000;
@@ -311,24 +337,33 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
                 : "「いまは難しい」と返事がありました";
             // ここも名前はDBの表示名で引く（届いた値をそのまま出さない）
             setAnswered({ id: Number(d.from?.id), text: a });
+          } else if (d.type === "auth.expired" || d.type === "auth.rejected") {
+            // セッションが無効になった（4001）／券が通らなかった（4003）。
+            // 続けて onclose が来るので、そこで券を取り直して繋ぎ直す
+            console.warn("[ws] " + d.type + ": " + d.reason);
           }
         } catch { /* 解釈できない通知は捨てる */ }
       };
-      ws.onclose = () => {
+      ws.onclose = (e) => {
         if (closed) return;
         setConn("切断");
         setStale(true);
-        timer = setTimeout(() => { delay = Math.min(delay * 2, 5000); connect(); }, delay);
+        // 4001（セッションが無効）と 4003（券が通らない）は、券を取り直せば入れることがある。
+        // **すぐに繋ぎ直すのは1回だけ**。以後は間隔を倍にする（上限30秒）。
+        // 空けないと、セッションが本当に無効なときに券の要求が際限なく増える
+        const retryNow = (e.code === 4001 || e.code === 4003) && delay === 1000;
+        const wait = retryNow ? 500 : delay;
+        timer = setTimeout(() => { delay = Math.min(delay * 2, 30_000); void connect(); }, wait);
       };
       ws.onerror = () => { /* close が続けて呼ばれる */ };
     };
-    connect();
+    void connect();
     return () => {
       closed = true;
       if (timer) clearTimeout(timer);
       wsRef.current?.close();
     };
-  }, [announce]);
+  }, [announce, isGuest]);
 
   // 断られた理由・呼びかけの結果は数秒で消す。画面に残し続けると邪魔になる
   useEffect(() => {
