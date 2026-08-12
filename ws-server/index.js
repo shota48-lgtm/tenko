@@ -13,20 +13,89 @@
 // なりすまし対策の要点:
 //   移動・呼びかけの発信元は「そのWebSocket接続に紐づく人」から取る。
 //   メッセージ本文の利用者IDは読まない。よって他人のアバターは動かせない。
-//   （presence.set で他人のIDを名乗れる点は、認証が未実装であることに由来する既知の穴。S6）
+//
+// Phase 5 段階6 で S6（他人の在席を偽装できる）を塞いだ:
+//   接続するには入場券が要る。**利用者IDは券から取り、接続に紐づける。**
+//   presence.set が名乗る user.id は読まない。券の無い接続は「見るだけ」で、
+//   presence に入らず、送ってきたメッセージは種別を問わず全て捨てる。
+//
+//   券の検証は handleProtocols で行うが、**そこでは断らない**。
+//   handleProtocols が false を返しても ws は connection を発生させるうえ、
+//   ブラウザには close code が届かず 1006 になる（spike/ws-auth-01 で実測）。
+//   判定は覚えるだけにし、断るのは connection の中で close(4003) / close(4004) による。
 
 const { WebSocketServer } = require("ws");
 const geo = require("./geometry");
+const { verifyTicket } = require("./ticket");
+
+// 手元で動かすときだけ、アプリ側の .env.local から鍵を借りる。
+// 本番（Railway）では環境変数が直接設定されるため、この読み込みは何もしない。
+// **既に環境変数がある場合は上書きしない。**
+(function loadLocalEnv() {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const p = path.join(__dirname, "..", ".env.local");
+    if (!fs.existsSync(p)) return;
+    for (const line of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
+      const i = line.indexOf("=");
+      if (i <= 0 || line.trimStart().startsWith("#")) continue;
+      const k = line.slice(0, i).trim();
+      if (!k.startsWith("TENKO_")) continue;          // アプリ専用の鍵は読まない
+      if (process.env[k] !== undefined) continue;
+      process.env[k] = line.slice(i + 1).trim().replace(/^["']|["']$/g, "");
+    }
+  } catch { /* 読めなくても本番には影響しない */ }
+})();
 
 const PORT = Number(process.env.PORT) || 8080;
 const NOTIFY_TOKEN = process.env.WS_NOTIFY_TOKEN || "dev-notify-token";
 const API = process.env.TENKO_API || "http://localhost:3000";
+const INTERNAL_TOKEN = process.env.TENKO_WS_INTERNAL_TOKEN || "";
+// 見るだけモード。0 のときは券の無い接続を受けない
+const PUBLIC_VIEW = (process.env.TENKO_PUBLIC_VIEW ?? "1") === "1";
+
+// 無効化の定期確認が続けて失敗したときの段階（設計書6節）
+const VERIFY_FAIL_WARN = 5;    // 5回（約5分）で警告に上げる
+const VERIFY_FAIL_CUT = 10;    // 10回（約10分）で認証済みの接続を全て切る
+// 確認の間隔。既定は60秒。
+// **確認スクリプトから短くできるようにしてある**（10回の失敗を10分待たずに確かめるため）
+const VERIFY_INTERVAL_MS = Number(process.env.TENKO_WS_VERIFY_INTERVAL_MS) || 60_000;
 
 // 画面（viewer）から受け付ける種別。src/lib/ws-messages.ts の VIEWER_ALLOWED と対応させる。
 // 前方一致で見るので、名前空間ごと許可できる
 const VIEWER_ALLOWED = ["presence.set", "presence.sync", "presence.move", "call."];
 
-const wss = new WebSocketServer({ port: PORT });
+// 接続ごとの判定を、handleProtocols から connection へ渡すための控え。
+// request をキーにする（同じリクエストが connection にも渡ってくる）
+const pendingAuth = new Map();
+
+const wss = new WebSocketServer({
+  port: PORT,
+  // **ここでは断らない。判定して覚えるだけ。**（設計書6節。spike/ws-auth-01 の実測にもとづく）
+  //
+  // 応答は常に "tenko.v1" を返す。券は返さない。
+  //   券を返しても接続は成立するが、券が応答ヘッダに載って返ることになる。
+  //   券をURLに載せない理由（経路のログに残る）と同じ理由で、応答にも載せない。
+  //   なお **何も返さない（false）とブラウザは 1006 で切る。** 応答は必ず返すこと
+  handleProtocols: (protocols, request) => {
+    const list = [...protocols];
+    const raw = list.find((p) => typeof p === "string" && p.startsWith("ticket."));
+    if (!raw) {
+      pendingAuth.set(request, { authed: false, why: "券なし（見るだけ）", hadTicket: false });
+    } else {
+      let v;
+      try { v = verifyTicket(raw.slice("ticket.".length)); }
+      catch (e) { v = { ok: false, why: "検証できない: " + e.message }; }
+      pendingAuth.set(request, v.ok
+        ? { authed: true, userId: v.userId, sessionId: v.sessionId, why: "OK", hadTicket: true }
+        : { authed: false, why: v.why, hadTicket: true });
+    }
+    // 画面が protocols を1つも送ってこない場合、この関数は呼ばれない。
+    // その接続は connection 側で「券なし」として扱う（下の既定値）
+    return "tenko.v1";
+  },
+});
 const presence = new Map();   // ws -> { id, name, colorIndex, state, baseState, talk, roomId, x, y }
 
 // 部屋の一覧（定員つき）。定員をサーバー側で判定するために持つ。
@@ -70,9 +139,101 @@ async function loadDemo() {
   }
 }
 
+// 無効化の定期確認（Phase 5 段階6）。
+//
+// **/api/demo-presence とは1本にまとめない**（PO判断）。
+// 周期は同じでも、失敗したときの扱いが逆であるため:
+//   demo-presence の失敗 → 前回の内容を使い続ける（村が空にならないように）
+//   ws-verify の失敗     → 段階的に切断する（無効化の仕組みが死んだままにならないように）
+// まとめると、片方の障害がもう片方を巻き込む。
+let verifyFails = 0;        // 連続で失敗した回数
+let verifyBlocked = false;  // 確認が続けて失敗し、認証済みとして扱うのをやめている状態
+
+// 認証済みの接続を全て見るだけに落とし、切る
+function cutAllAuthed(reason) {
+  let n = 0;
+  for (const c of wss.clients) {
+    if (c.authed !== true) continue;
+    presence.delete(c);
+    c.authed = false;
+    try {
+      c.send(JSON.stringify({ type: "auth.expired", reason }));
+      c.close(4001, reason);
+    } catch { /* 既に閉じている */ }
+    n++;
+  }
+  if (n > 0) sendList(true);
+  return n;
+}
+
+async function verifySessions() {
+  // いま繋がっている認証済みの接続の、セッションの行id
+  const bySession = new Map();   // sessionId -> [ws, ...]
+  for (const c of wss.clients) {
+    if (c.authed !== true || !c.sessionId) continue;
+    if (!bySession.has(c.sessionId)) bySession.set(c.sessionId, []);
+    bySession.get(c.sessionId).push(c);
+  }
+  if (bySession.size === 0) {
+    // 確認する相手がいないときは、失敗の数え上げもしない
+    return;
+  }
+
+  try {
+    const res = await fetch(API + "/api/ws-verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-tenko-internal": INTERNAL_TOKEN },
+      body: JSON.stringify({ sessionIds: [...bySession.keys()] }),
+    });
+    if (!res.ok) throw new Error("status " + res.status);
+    const d = await res.json();
+    const invalid = Array.isArray(d.invalid) ? d.invalid.map(String) : [];
+
+    verifyFails = 0;
+    if (verifyBlocked) {
+      verifyBlocked = false;
+      console.log("[verify] 確認が成功した。認証済みの接続を再び受け付ける");
+    }
+
+    let cut = 0;
+    for (const sid of invalid) {
+      for (const c of bySession.get(sid) ?? []) {
+        presence.delete(c);
+        c.authed = false;
+        try {
+          c.send(JSON.stringify({ type: "auth.expired", reason: "session revoked" }));
+          c.close(4001, "session revoked");
+        } catch { /* 既に閉じている */ }
+        cut++;
+      }
+    }
+    if (cut > 0) {
+      console.log("[verify] 無効になったセッションの接続を " + cut + " 本切った");
+      sendList(true);
+    }
+  } catch (e) {
+    verifyFails++;
+    const msg = "[verify] 確認できなかった（" + verifyFails + "回目）: " + e.message;
+    if (verifyFails >= VERIFY_FAIL_CUT) {
+      // **10回（約10分）続いたら、認証済みの接続を全て切る。**
+      // 60秒の遅延を許容できるとした根拠は「短時間の障害なら在席の表示が古くなるだけ」だった。
+      // 10分続く障害は、その前提が崩れている
+      verifyBlocked = true;
+      const n = cutAllAuthed("verify unavailable");
+      console.error(msg + " → 連続" + VERIFY_FAIL_CUT + "回。認証済みの接続 " + n + " 本を切り、以後は見るだけ扱いにする");
+    } else if (verifyFails >= VERIFY_FAIL_WARN) {
+      console.error(msg + " → 連続" + VERIFY_FAIL_WARN + "回以上。新しい接続は受け続ける");
+    } else {
+      console.log(msg);
+    }
+  }
+}
+
 loadRooms();
 loadDemo();
 setInterval(() => { loadRooms(); loadDemo(); }, 60_000);
+// 無効化の確認は別の周期で回す。取得の失敗が互いに影響しないようにするため
+setInterval(verifySessions, VERIFY_INTERVAL_MS);
 
 function capacityOf(roomId) {
   const r = rooms.find((x) => Number(x.id) === Number(roomId));
@@ -231,7 +392,38 @@ wss.on("connection", (ws, req) => {
     url.searchParams.get("role") === "notifier" &&
     url.searchParams.get("token") === NOTIFY_TOKEN;
 
-  console.log("[open] " + (ws.isNotifier ? "notifier" : "viewer") + " clients=" + wss.clients.size);
+  // handleProtocols が覚えた判定を受け取る。
+  // **既定は「券なし」。** 画面が protocols を1つも送らないと handleProtocols は
+  // 呼ばれず、控えに何も入らない。その場合も見るだけとして扱う（実測で確認した）
+  const auth = pendingAuth.get(req) ?? { authed: false, why: "券なし（見るだけ）", hadTicket: false };
+  pendingAuth.delete(req);
+  // 無効化の確認が続けて失敗している間は、券が正しくても認証済みにしない。
+  // 無効化されたセッションを見分けられない状態で、村に人を増やさないため
+  if (auth.authed && verifyBlocked) {
+    auth.authed = false;
+    auth.why = "無効化の確認ができないため見るだけ扱い";
+    auth.hadTicket = false;   // 券のせいではないので 4003 では切らない
+  }
+  ws.authed = auth.authed === true;
+  ws.userId = ws.authed ? auth.userId : null;
+  ws.sessionId = ws.authed ? auth.sessionId : null;
+
+  console.log("[open] " + (ws.isNotifier ? "notifier" : "viewer")
+    + " " + (ws.authed ? "認証済み userId=" + ws.userId : "見るだけ（" + auth.why + "）")
+    + " clients=" + wss.clients.size);
+
+  // 券があったのに通らなかった接続は、ここで断る。
+  // **ハンドシェイクでは断らない**（close code が画面に届かず 1006 になるため）
+  if (!ws.isNotifier && auth.hadTicket && !ws.authed) {
+    ws.send(JSON.stringify({ type: "auth.rejected", reason: auth.why }));
+    ws.close(4003, "ticket invalid");
+    return;
+  }
+  // 見るだけモードを止めているときは、券の無い接続を受けない
+  if (!ws.isNotifier && !ws.authed && !PUBLIC_VIEW) {
+    ws.close(4004, "public view disabled");
+    return;
+  }
 
   if (!ws.isNotifier) {
     ws.send(JSON.stringify({ type: "presence.list", users: presenceList(), rooms: roomCounts() }));
@@ -242,6 +434,12 @@ wss.on("connection", (ws, req) => {
     if (ws.isNotifier) {
       console.log("[notify] " + text.slice(0, 120));
       broadcast(JSON.parse(text));
+      return;
+    }
+    // **他のどの判定よりも先に、認証を見る。**
+    // 券の無い接続（見るだけ）からのメッセージは、種別を問わず全て捨てる
+    if (!ws.authed) {
+      console.log("[drop] 券の無い接続からの受信を捨てた: " + text.slice(0, 80));
       return;
     }
     // 画面側から受け付ける種別は、この許可リストにあるものだけ。
@@ -259,8 +457,9 @@ wss.on("connection", (ws, req) => {
       if (msg.state === "off") { presence.delete(ws); sendList(true); return; }
       const prev = presence.get(ws);
       const state = ["idle", "away", "talking", "resting"].indexOf(msg.state) >= 0 ? msg.state : "idle";
-      // 位置がまだ無い人にだけ初期値を与える。以後はその人の座標が正
-      const uid = Number(u.id) || 0;
+      // **利用者IDは券から取る。msg.user.id は読まない**（Phase 5 段階6。S6 を塞ぐ）。
+      // ここが段階5まで `Number(u.id)` になっており、他人の在席を偽装できた
+      const uid = ws.userId;
       // 同じ人が戻ってきたら、前にいた場所に戻す。初めてなら空いている場所を探す
       const remembered = lastSpot.get(uid);
       let spot = prev ? { x: prev.x, y: prev.y } : (remembered || freeSpot());
@@ -277,9 +476,12 @@ wss.on("connection", (ws, req) => {
       }
       presence.set(ws, {
         id: uid,
-        // 名前も他人の画面に出るため、長さを切る。中継しかしないサーバー側でも防ぐ
+        // 名前も他人の画面に出るため、長さを切る。中継しかしないサーバー側でも防ぐ。
+        // （そもそも presenceList では配らない。画面はDBの表示名を使う）
         name: String(u.name || "名無し").slice(0, 40),
-        colorIndex: Number(u.colorIndex) || 1,
+        // 色も自己申告を読まない。利用者IDから決める（page.tsx と同じ規則）。
+        // 申告を読むと、他人と同じ色を名乗って紛らわしくできる
+        colorIndex: ((uid - 1) % 4) + 1,
         // 建物の中にいるなら会議中。位置が状態を決める（Phase 4.8）
         state: roomId != null ? "talking" : state,
         // 建物から出たときに戻す状態。会議中は「位置が決めた状態」なので控えに入れない

@@ -34,6 +34,13 @@ const PUBLIC_ROUTES = [
 // Auth.js の入口だけは例外（ここを止めるとログインできなくなる）
 const MUST_GUARD = PUBLIC_ROUTES.filter((p) => !p.includes("[...nextauth]"));
 
+// サーバ同士の経路。利用者のセッションではなく、共有秘密で守る。
+// ws-server から呼ばれるため Cookie が無く、currentActor() は使えない。
+// **素通しではない**ことを、共有秘密の確認があることで検査する
+const INTERNAL_ROUTES = [
+  "app/api/ws-verify/route.ts",
+];
+
 const problems = [];
 const files = [];
 (function walk(dir) {
@@ -63,8 +70,14 @@ for (const f of routeFiles) {
   const r = rel(f);
   const text = fs.readFileSync(f, "utf8");
   const isPublic = PUBLIC_ROUTES.includes(r);
-  const hasActor = /currentActor\s*\(/.test(text);
+  const isInternal = INTERNAL_ROUTES.includes(r);
+  // 内部の経路は共有秘密で守る。その確認が本当にあるかを見る
+  const hasInternalGuard = /x-tenko-internal/.test(text) && /TENKO_WS_INTERNAL_TOKEN/.test(text);
+  const hasActor = /currentActor\s*\(/.test(text) || (isInternal && hasInternalGuard);
 
+  if (isInternal && !hasInternalGuard) {
+    problems.push("内部の経路なのに共有秘密の確認が無い: src/" + r);
+  }
   if (!isPublic && !hasActor) {
     problems.push("認証も開放の宣言も無い経路: src/" + r);
   }
@@ -79,8 +92,9 @@ for (const f of routeFiles) {
   if (writes.length > 0 && !hasActor) {
     problems.push("書き込みなのに currentActor() が無い: src/" + r + "（" + writes.join("/") + "）");
   }
-  // 書き込みの経路は Origin も確かめる（CSRFの2層目）
-  if (writes.length > 0 && !/assertSameOrigin\s*\(/.test(text)) {
+  // 書き込みの経路は Origin も確かめる（CSRFの2層目）。
+  // 内部の経路（サーバ同士）は Origin を持たないため、共有秘密の確認で代える
+  if (writes.length > 0 && !isInternal && !/assertSameOrigin\s*\(/.test(text)) {
     problems.push("書き込みなのに assertSameOrigin() が無い: src/" + r + "（" + writes.join("/") + "）");
   }
 }
@@ -114,7 +128,9 @@ console.log("");
 for (const f of routeFiles) {
   const r = rel(f);
   const text = fs.readFileSync(f, "utf8");
-  const mark = PUBLIC_ROUTES.includes(r) ? "開放" : (/currentActor\s*\(/.test(text) ? "認証" : "不明");
+  const mark = PUBLIC_ROUTES.includes(r) ? "開放"
+    : INTERNAL_ROUTES.includes(r) ? "認証:内部"
+      : (/currentActor\s*\(/.test(text) ? "認証" : "不明");
   console.log("  [" + mark + "] src/" + r);
 }
 console.log("");
