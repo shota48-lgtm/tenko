@@ -52,6 +52,8 @@ export default function Home() {
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [input, setInput] = useState("");
   const [roomName, setRoomName] = useState<string>("");
+  // ログインしていないとき。書いた文は行列に残したまま、ログインを促す
+  const [needLogin, setNeedLogin] = useState(false);
   const lastIdRef = useRef(0);
   const pendingRef = useRef<Pending[]>([]);
   const sendingRef = useRef(false);
@@ -92,7 +94,10 @@ export default function Home() {
   // 差分取得。初回と再接続のたびに呼ぶ
   const fetchSince = useCallback(async () => {
     const res = await fetch(`/api/rooms/${roomId}/messages?after=${lastIdRef.current}`);
+    // チャットの本文はログインした人だけが読める（Phase 5 段階3）
+    if (res.status === 401) { setNeedLogin(true); return; }
     if (!res.ok) return;
+    setNeedLogin(false);
     const data = (await res.json()) as { messages: Message[] };
     mergeMessages(data.messages.map((m) => ({ ...m, id: Number(m.id) })));
   }, [mergeMessages, roomId]);
@@ -111,7 +116,16 @@ export default function Home() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ clientMsgId: item.clientMsgId, body: item.body }),
           });
-          // 4xx は送り直しても通らないので行列から外す。5xx と通信断は残して再送する
+          // 4xx は送り直しても通らないので行列から外す。5xx と通信断は残して再送する。
+          //
+          // **401 だけは別扱いにする（Phase 5 段階3）。**
+          // 認証が入り、ログインしていなければ 401 が返るようになった。
+          // 401 を「送り直しても通らない」に含めると、書いた文が黙って消える。
+          // ログインし直せば通るので、行列に残したまま止める
+          if (res.status === 401) {
+            setNeedLogin(true);
+            break;
+          }
           ok = res.ok || (res.status >= 400 && res.status < 500);
         } catch {
           ok = false;
@@ -229,6 +243,18 @@ export default function Home() {
       </header>
 
       <div className="mx-auto max-w-3xl px-4 py-3">
+        {/* ログインしていないとき。書いた文は消さずに残してある */}
+        {needLogin && (
+          <div
+            role="alert"
+            className="mb-3 border border-[var(--tk-red)] px-3 py-2 text-xs"
+            style={{ background: "#f6e2dc" }}
+          >
+            <strong>チャットを読む・書くにはログインが必要です。</strong>
+            {pending.length > 0 && <>（書いた {pending.length} 件は消さずに残してあります）</>}
+            <Link href="/login" className="tk-btn ml-2 px-2 py-0.5 text-[11px]">ログイン</Link>
+          </div>
+        )}
         {drafts.length > 0 && (
           <section className="tk-panel mb-3">
             <div className="tk-head px-3 py-2">

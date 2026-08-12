@@ -13,6 +13,7 @@
 import { pool } from "@/lib/db";
 import VillageClient from "./village-client";
 import type { Room } from "@/village/render";
+import { currentActor } from "@/lib/actor";
 
 // 毎回DBから読む。部屋の追加や定員の変更が、次に開いたときに反映されるように
 export const dynamic = "force-dynamic";
@@ -32,5 +33,20 @@ async function loadRooms(): Promise<Room[]> {
 
 export default async function Page() {
   const rooms = await loadRooms();
-  return <VillageClient initialRooms={rooms} />;
+
+  // 誰として村に入るかは、ここ（サーバー側）で決める。
+  // 画面側に決めさせない（Phase 5 段階3。以前は URL の ?me= で誰にでもなれた）。
+  // 未ログインなら null を渡す。村は見えるが、自分のアバターは出ない
+  const actor = await currentActor();
+  const me = actor
+    ? {
+        id: actor.id,
+        name: actor.displayName,
+        role: actor.role,
+        // 色は利用者IDから決める。画面側で選ばせない（他人と同じ色を名乗れないように）
+        colorIndex: ((actor.id - 1) % 4) + 1,
+      }
+    : null;
+
+  return <VillageClient initialRooms={rooms} me={me} />;
 }

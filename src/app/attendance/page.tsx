@@ -23,13 +23,10 @@ type Correction = {
 const KIND_LABEL: Record<string, string> = { arrive: "出社", leave: "退勤", break: "休憩", late: "遅刻" };
 const STATUS_LABEL: Record<string, string> = { submitted: "承認待ち", approved: "承認済み", returned: "差し戻し" };
 
-function actorId() {
-  if (typeof window === "undefined") return 1;
-  return Number(new URLSearchParams(window.location.search).get("me") ?? 1);
-}
-
+// 誰として見るかはサーバー（セッション）が決める。
+// Phase 5 段階3 で、URL の ?me= を読む actorId() を削除した
 export default function AttendancePage() {
-  const [me, setMe] = useState(1);
+  const [me, setMe] = useState<{ id: number; role: string } | null>(null);
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [labels, setLabels] = useState<Record<string, string>>({});
   const [thresholds, setThresholds] = useState<{ longWorkHours: number; days: number } | null>(null);
@@ -42,16 +39,17 @@ export default function AttendancePage() {
   const [reason, setReason] = useState("");
   const [target, setTarget] = useState("");
 
-  const load = useCallback(async (uid: number) => {
+  const load = useCallback(async () => {
     try {
-      const a = await fetch("/api/attendance/anomalies?user=" + uid);
+      const a = await fetch("/api/attendance/anomalies");
       if (a.ok) {
         const j = await a.json();
         setAnomalies(j.anomalies ?? []);
         setLabels(j.labels ?? {});
         setThresholds(j.thresholds ?? null);
+        setMe(j.actor ?? null);
       }
-      const c = await fetch("/api/attendance/corrections?user=" + uid);
+      const c = await fetch("/api/attendance/corrections");
       if (c.ok) {
         const j = await c.json();
         setCorrections(j.corrections ?? []);
@@ -63,16 +61,14 @@ export default function AttendancePage() {
 
   useEffect(() => {
     const t = setTimeout(() => {
-      const uid = actorId();
-      setMe(uid);
-      void load(uid);
+      void load();
     }, 0);
     return () => clearTimeout(t);
   }, [load]);
 
   const submit = async () => {
     setError(null);
-    const body: Record<string, unknown> = { user: me, kind, eventAt: when, reason };
+    const body: Record<string, unknown> = { kind, eventAt: when, reason };
     if (target.trim() !== "") body.correctsRecordId = Number(target);
     const r = await fetch("/api/attendance/corrections", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -84,7 +80,7 @@ export default function AttendancePage() {
     }
     setReason("");
     setTarget("");
-    await load(me);
+    await load();
   };
 
   return (
@@ -93,7 +89,7 @@ export default function AttendancePage() {
         <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2">
           <h1 className="text-sm font-bold tracking-widest">tenko</h1>
           <span className="text-sm font-bold">勤怠の確認</span>
-          <span className="text-xs" style={{ color: "var(--tk-ink-soft)" }}>利用者 {me}</span>
+          <span className="text-xs" style={{ color: "var(--tk-ink-soft)" }}>{me ? "利用者 " + me.id : "ログインが必要です"}</span>
           <Link href="/" className="tk-btn tk-btn-quiet ml-auto text-xs">村へ戻る</Link>
         </div>
       </header>

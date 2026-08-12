@@ -30,21 +30,18 @@ type Item = {
 
 const KIND_LABEL: Record<Item["kind"], string> = { arrive: "出社", leave: "退勤", break: "休憩", late: "遅刻" };
 
-function actorId() {
-  if (typeof window === "undefined") return 1;
-  return Number(new URLSearchParams(window.location.search).get("me") ?? 1);
-}
-
+// 誰として承認するかはサーバー（セッション）が決める。
+// Phase 5 段階3 で、URL の ?me= を読む actorId() を削除した
 export default function ApprovalsPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [reasons, setReasons] = useState<Record<number, string>>({});
   // 押してから一覧が入れ替わるまでの間、押せたことが分かるようにする
   const [busy, setBusy] = useState<number | null>(null);
-  const [me, setMe] = useState(1);
+  const [me, setMe] = useState<{ id: number; role: string } | null>(null);
 
-  const load = useCallback(async (uid: number) => {
-    const res = await fetch("/api/attendance/approvals?user=" + uid);
+  const load = useCallback(async () => {
+    const res = await fetch("/api/attendance/approvals");
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       setError(j.error ?? "一覧を取得できませんでした");
@@ -53,15 +50,14 @@ export default function ApprovalsPage() {
     }
     const j = await res.json();
     setError(null);
+    setMe(j.actor ?? null);
     setItems((j.items ?? []).map((x: Item) => ({ ...x, id: Number(x.id) })));
   }, []);
 
   useEffect(() => {
     // effect の本体から直接 setState すると連鎖描画になるため、一度キューに逃がす
     const t = setTimeout(() => {
-      const uid = actorId();
-      setMe(uid);
-      void load(uid);
+      void load();
     }, 0);
     return () => clearTimeout(t);
   }, [load]);
@@ -70,7 +66,7 @@ export default function ApprovalsPage() {
     setBusy(id);
     setError(null);
     try {
-      const body: Record<string, unknown> = { action, user: me };
+      const body: Record<string, unknown> = { action };
       if (action === "return") body.reason = reasons[id] ?? "";
       const res = await fetch("/api/attendance/approvals/" + id, {
         method: "POST",
@@ -81,7 +77,7 @@ export default function ApprovalsPage() {
         const j = await res.json().catch(() => ({}));
         setError(j.error ?? "操作できませんでした");
       }
-      await load(me);
+      await load();
     } finally {
       setBusy(null);
     }
@@ -96,7 +92,7 @@ export default function ApprovalsPage() {
           <span className="tk-panel px-2 py-0.5 text-xs">
             承認待ち {items.length} 件
           </span>
-          <span className="text-xs tk-soft">承認者: 利用者 {me}</span>
+          <span className="text-xs tk-soft">{me ? "承認者: 利用者 " + me.id : "ログインが必要です"}</span>
           <Link href="/" className="tk-btn tk-btn-quiet ml-auto text-xs">村へ戻る</Link>
         </div>
       </header>

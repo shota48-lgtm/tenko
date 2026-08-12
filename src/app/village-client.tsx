@@ -70,13 +70,15 @@ type User = { id: number; displayName: string };
 // 呼びかけ。名前は持たない。表示のたびにDBの表示名で引く（自己申告の名前を画面に出さない）
 type Incoming = { id: number; knewFocus?: boolean };
 
-// 認証は未実装。利用者は暫定的に固定値で扱う
-function devUser() {
-  if (typeof window === "undefined") return { id: 1, name: "利用者1", colorIndex: 1 };
-  const q = new URLSearchParams(window.location.search);
-  const id = Number(q.get("me") ?? 1);
-  return { id, name: q.get("name") ?? "利用者" + id, colorIndex: ((id - 1) % 4) + 1 };
-}
+// 誰として村にいるかは、サーバー側（page.tsx）が決めてここへ渡す。
+// **画面側で利用者を決める仕組みは持たない**（Phase 5 段階3で devUser() を削除した。
+// 以前は URL の ?me= を読んでおり、誰にでもなりすませた）。
+export type Me = { id: number; name: string; role: string; colorIndex: number };
+
+// 未ログインのときに使う置き。id=0 は誰とも一致しないため、
+// 「自分」として描かれる人がいない状態になる
+const GUEST: Me = { id: 0, name: "", role: "", colorIndex: 1 };
+
 function isDebug() {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).get("debug") === "1";
@@ -90,8 +92,11 @@ const menuBtnOn = "tk-btn tk-btn-on w-full justify-start text-xs";
 // 画面側で /api/rooms を取りに行っていたところ、到着まで1.4秒かかり（実測）、
 // その間は建物のない村が描かれていた。POが開いた直後の画面がこの状態だった。
 // 建物の配置は村の骨組みであり、後から届く情報にしてはいけない。
-export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) {
+export default function VillagePage({ initialRooms, me: sessionMe }: { initialRooms: Room[]; me: Me | null }) {
   const router = useRouter();
+  // ログインしていない人は「見るだけ」。村は見えるが、自分のアバターは出ない
+  const isGuest = sessionMe === null;
+  const me = sessionMe ?? GUEST;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [variant, setVariant] = useState<"a" | "b" | "c">(ACTIVE_VARIANT);
   const [rooms] = useState<Room[]>(initialRooms);
@@ -107,7 +112,6 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   const [noteError, setNoteError] = useState<string | null>(null);
   const [noteSaved, setNoteSaved] = useState(false);
   const [autoAway, setAutoAway] = useState(false);
-  const [me, setMe] = useState({ id: 1, name: "利用者1", colorIndex: 1 });
   const [debug, setDebug] = useState(false);
   // アバターを押して出すもの。自分なら操作、他人なら情報だけ
   const [picked, setPicked] = useState<{ id: number; x: number; y: number } | null>(null);
@@ -157,7 +161,9 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   //   "hover": 乗せた人だけ出す
   // 既定は「全員」。22人で重なり0・名前を覆う数0 を実測して決めた（PHASE49_LOG.md）
   const [bubbleMode, setBubbleMode] = useState<"few" | "all" | "hover">("all");
-  const [myRole, setMyRole] = useState<string | null>(null);
+  // 役割はサーバーから渡ってくる。/api/me を叩き直さない。
+  // これは画面の分岐（承認への導線を出すか）にしか使わない。権限の判定はAPI側
+  const myRole = sessionMe?.role ?? null;
 
   const wsRef = useRef<WebSocket | null>(null);
   const userRef = useRef(me);
@@ -185,13 +191,16 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   }, []);
 
   const announce = useCallback((state: Presence["state"], talkStatus: TalkStatus) => {
+    // 見るだけの人は村に現れない。在席を申告しない（Phase 5 段階3）。
+    // ws-server 側の検証は段階6で入れる。ここで送らないのは体験のためであって、担保ではない
+    if (isGuest) return false;
     return send({ type: "presence.set", user: userRef.current, state, roomId: null, talk: talkStatus });
-  }, [send]);
+  }, [send, isGuest]);
 
   // 未読と勤怠の下書き。村に出すために定期的に取り直す
-  const loadVillage = useCallback(async (uid: number) => {
+  const loadVillage = useCallback(async () => {
     try {
-      const res = await fetch("/api/village?user=" + uid);
+      const res = await fetch("/api/village");
       if (!res.ok) return;
       const d = await res.json();
       setUnread(d.unread ?? {});
@@ -199,9 +208,9 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
     } catch { /* 取れなくても村は描く */ }
   }, []);
 
-  const loadAnns = useCallback(async (uid: number) => {
+  const loadAnns = useCallback(async () => {
     try {
-      const res = await fetch("/api/announcements?user=" + uid);
+      const res = await fetch("/api/announcements");
       if (!res.ok) return;
       const d = await res.json();
       setAnns(d.announcements ?? []);
@@ -230,21 +239,20 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
         router.replace("/rooms/" + legacyRoom);
         return;
       }
-      const u = devUser();
-      setMe(u);
-      userRef.current = u;
       setDebug(isDebug());
+      // 名前と吹き出しは村の絵の一部なので、ログインしていなくても読む
       void fetch("/api/users").then((r) => r.json()).then((d) => setUsers(d.users ?? [])).catch(() => {});
       void loadNotes();
-      void fetch("/api/notes?user=" + u.id).then((r) => r.json())
+      // ここから下は自分の情報。ログインしている人だけが叩く。
+      // 叩いても 401 が返るだけだが、無駄な要求を出さない
+      if (isGuest) return;
+      void fetch("/api/notes?mine=1").then((r) => r.json())
         .then((d) => setNoteInput(d.note?.body ?? "")).catch(() => {});
-      void fetch("/api/me?user=" + u.id).then((r) => r.json())
-        .then((d) => setMyRole(d.me?.role ?? null)).catch(() => {});
-      void loadVillage(u.id);
-      void loadAnns(u.id);
+      void loadVillage();
+      void loadAnns();
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes, loadVillage, loadAnns, router]);
+  }, [loadNotes, loadVillage, loadAnns, router, isGuest]);
 
   // WebSocket。在席・位置・呼びかけを配る
   useEffect(() => {
@@ -355,9 +363,9 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   }, [announce]);
 
   useEffect(() => {
-    const t = setInterval(() => { void loadNotes(); void loadVillage(userRef.current.id); }, 30_000);
+    const t = setInterval(() => { void loadNotes(); if (!isGuest) void loadVillage(); }, 30_000);
     return () => clearInterval(t);
-  }, [loadNotes, loadVillage]);
+  }, [loadNotes, loadVillage, isGuest]);
 
   // 画面に村全体が入る拡大率を測る。窓の大きさが変わるたびに測り直す
   useEffect(() => {
@@ -564,7 +572,7 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
     const res = await fetch("/api/notes", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body: noteInput, user: me.id }),
+      body: JSON.stringify({ body: noteInput }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -580,7 +588,7 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   const clearNote = async () => {
     await fetch("/api/notes", {
       method: "DELETE", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: me.id }),
+      body: "{}",
     });
     setNoteInput("");
     setNoteSaved(false);
@@ -639,16 +647,16 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
     setShowAnns(true);
     await fetch("/api/announcements", {
       method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: me.id }),
+      body: "{}",
     }).catch(() => {});
-    await loadAnns(me.id);
+    await loadAnns();
   };
 
   const postAnn = async () => {
     setAnnError(null);
     const res = await fetch("/api/announcements", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body: annInput, user: me.id }),
+      body: JSON.stringify({ body: annInput }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -656,15 +664,15 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
       return;
     }
     setAnnInput("");
-    await loadAnns(me.id);
+    await loadAnns();
   };
 
   const decideDraft = async (id: number, action: "confirm" | "reject") => {
     await fetch("/api/attendance/drafts/" + id, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, user: me.id }),
+      body: JSON.stringify({ action }),
     });
-    await loadVillage(me.id);
+    await loadVillage();
   };
 
   const pickedPerson = picked ? people.find((p) => Number(p.id) === picked.id) : undefined;
@@ -714,15 +722,25 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
             {stale && "（表示は切断前のものです）"}
           </span>
         )}
-        {/* 認証が無いことを利用者にも見える形で出す（6-3）。
-            目立ちすぎず、しかし気づける位置に置く。README にも記載 */}
-        <span
-          className="border border-[var(--tk-ink)] px-1.5 py-0.5 text-[10px]"
-          style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
-          title="URLの me= を変えると誰にでもなりすませます。本番では使えません"
-        >
-          お試し版・ログインなし（誰にでもなりすませます）
-        </span>
+        {/* 段階2までは「お試し版・ログインなし（誰にでもなりすませます）」を常時出していた。
+            段階3で認証が入り、その表示は実態と食い違うようになったため差し替えた。
+            いまは「見るだけかどうか」を出す。見るだけの人には、そう分かる形にする */}
+        {isGuest ? (
+          <span
+            className="border border-[var(--tk-ink)] px-1.5 py-0.5 text-[10px]"
+            style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
+            title="ログインすると、自分のアバターが村に出ます"
+          >
+            見るだけ（ログインしていません）
+          </span>
+        ) : (
+          <span className="px-1.5 py-0.5 text-[10px] tk-soft" title="ログインしています">
+            {me.name}
+          </span>
+        )}
+        {isGuest && (
+          <Link href="/login" className="tk-btn px-2 py-0.5 text-[10px]">ログイン</Link>
+        )}
         {debug && (
           <span className="ml-auto flex items-center gap-2 text-[11px]">
             <button onClick={() => setOccupants((v) => (v === "show" ? "hide" : "show"))} className="tk-btn tk-btn-quiet px-1.5 py-0.5">
