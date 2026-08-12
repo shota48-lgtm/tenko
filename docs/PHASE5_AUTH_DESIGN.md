@@ -150,11 +150,12 @@ ALTER TABLE users ADD COLUMN is_demo BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE users ADD CONSTRAINT users_demo_has_no_email
   CHECK (is_demo = false OR email IS NULL);
 
--- 3) アダプタが万一 createUser を呼んでも 500 にならないようにする保険。
---    display_name は NOT NULL で、アダプタの INSERT はこの列を渡さない。
---    設計上ここには到達しない（未登録は signIn で先に落とす）が、
---    「到達したら不明なエラーで落ちる」状態にはしない
-ALTER TABLE users ALTER COLUMN display_name SET DEFAULT '(未登録)';
+-- 3) （この文は実行しなかった。2026-08-13 / 段階1）
+--    ALTER TABLE users ALTER COLUMN display_name SET DEFAULT '(未登録)';
+--    アダプタが万一 createUser を呼んでも 500 にならないようにする保険だったが、
+--    既存の列の既定値を変える操作であり、実行条件
+--    「既存テーブルの既存の列と制約を変更しないこと」に反するため落とした。
+--    未登録者は signIn で先に落ちるため createUser には到達せず、保険が無くても設計は成立する。
 
 -- 4) Auth.js のテーブル。列名は大文字小文字を含むため必ず二重引用符付きで作る
 CREATE TABLE accounts (
@@ -222,7 +223,6 @@ DROP TABLE IF EXISTS verification_token;
 DROP TABLE IF EXISTS sessions;
 DROP TABLE IF EXISTS accounts;
 
-ALTER TABLE users ALTER COLUMN display_name DROP DEFAULT;
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_demo_has_no_email;
 ALTER TABLE users DROP COLUMN IF EXISTS is_demo;
 DROP INDEX IF EXISTS users_email_uq;
@@ -238,7 +238,11 @@ ALTER TABLE users DROP COLUMN IF EXISTS name;
 ### 既存の56人にどう対処するか
 
 1. 実在する人（PO本人・実際に使う人）には `email` を入れる。この人たちだけがログインできる
-2. 残りは `is_demo = true` にし、`demo_presence` に位置と状態を入れる。`email` は NULL のまま
+2. 残りは `is_demo = true` にする。`email` は NULL のまま。
+   **そのうち20人前後にだけ `demo_presence` の行を入れる**（2026-08-13 PO判断）。
+   行がある人だけが村に出る。行が無いデモ用の利用者は「メンバー一覧には出るが村にはいない」。
+   実際の職場でも全員が同時に在席してはいないため、これが自然でもある。
+   22人までは重なり0を実測済み（PHASE49_LOG.md）で、20人はその範囲に収まる
 3. デモ用の利用者は、`users` からは消さない。過去のチャット・勤怠の記録が外部キーで参照しているため
    （消すと Phase 1〜4 のデータが壊れる）
 
@@ -299,11 +303,18 @@ ALTER TABLE users DROP COLUMN IF EXISTS name;
 
 | 案 | 内容 | 評価 |
 |---|---|---|
-| **A（推奨）** | Google プロバイダに `allowDangerousEmailAccountLinking: true` を付ける | 1行で済む。「危険」とされるのは**複数の**プロバイダを併用し、片方がメールを検証していない場合。tenko は **Google 1つだけ**で、`email_verified` を自分でも確認する。この条件下では既存の行に紐づく以外の経路が無い |
+| **A（採用。2026-08-13 PO承認）** | Google プロバイダに `allowDangerousEmailAccountLinking: true` を付ける | 1行で済む。「危険」とされるのは**複数の**プロバイダを併用し、片方がメールを検証していない場合。tenko は **Google 1つだけ**で、`email_verified` を自分でも確認する。この条件下では既存の行に紐づく以外の経路が無い |
 | B | アダプタをラップし、`createUser` を「既存行の更新」に差し替える | アダプタの内部実装に依存する。beta の更新で壊れる |
 
 Aを採る場合、リンクが起きる条件を「Googleが検証済みと言い、かつ `users` に登録済みで、かつデモ用でない」に
-`signIn` 側で絞るため、実質的な危険は残らない。**この判断はPOに確認したい**（8節）。
+`signIn` 側で絞るため、実質的な危険は残らない。
+
+> **この設定は Google 単独である限り安全である。**
+> **将来 Microsoft など別の提供元を追加する場合、この設定を必ず見直すこと。**
+> 提供元が2つ以上になった時点で、「同じメールアドレスを名乗る別の提供元」という経路が生まれ、
+> この設定は安全でなくなる。
+
+同じ文言を `src/auth.ts` の該当箇所のコメントにも置いた（2026-08-13 / 段階2）。
 
 ### 最初の管理者
 
@@ -331,11 +342,11 @@ Aを採る場合、リンクが起きる条件を「Googleが検証済みと言�
 |---|---|---|---|
 | `/api/rooms` | GET | **開放** | 建物を描くのに要る。返すのは部屋名・種別・定員・飾りのみ |
 | `/api/users` | GET | **開放（返す内容を減らす）** | 村の名前ラベルに要る。**いまは全員の `id` と `display_name` を返している。未ログインには `is_demo` と、村にいる人だけに絞る** |
-| `/api/notes` | GET（全員分） | **開放（PO判断）** | 吹き出し（今日やること）。村が「動いている」ことの主な表現。ただし業務内容が読めるため、8節でPOに確認する |
+| `/api/notes` | GET（全員分） | **開放。ただしデモ用の利用者の分だけ**（2026-08-13 PO判断） | 吹き出し（今日やること）。村が「動いている」ことの主な表現。**実在の利用者が書いた分は未認証に返さない。** いまDBにあるのは全て検証データなので差は出ないが、実運用に入った瞬間、この区別が無いと業務内容が外部に漏れる。実装は `WHERE u.is_demo` を付ける形で行う |
 | `/api/notes` | GET（自分の）/ PUT / DELETE | 閉じる | 自分の情報の読み書き |
 | `/api/me` | GET | 閉じる | 自分の role を返す |
 | `/api/village` | GET | 閉じる | 自分の未読と勤怠の下書き |
-| `/api/announcements` | GET / POST / PUT / DELETE | 閉じる | 社内のお知らせ。未ログインには噴水を「ログインすると読めます」と出す |
+| `/api/announcements` | GET / POST / PUT / DELETE | 閉じる | 社内のお知らせ。**噴水は描き、押せることも分かるが、中身は見えない**。押すと「ログインすると読めます」と出す（2026-08-13 PO判断） |
 | `/api/rooms/[roomId]/messages` | GET / POST | 閉じる | チャット本文 |
 | `/api/attendance/drafts` | GET | 閉じる | **勤怠** |
 | `/api/attendance/drafts/[id]` | POST | 閉じる | **勤怠** |
@@ -520,8 +531,28 @@ ws-server → POST /api/ws-verify  { sessionIds: [...] }   ヘッダ: x-tenko-in
 | 券の使い回し | nonce を記憶しているので拒否。`close(4003)` |
 | 接続中にセッションが消された | 60秒以内の定期確認で検出し、`close(4001)` |
 | 接続中にセッションが7日で期限切れ | 同上。`expires > now()` を確認しているため同じ経路で落ちる |
-| 定期確認がアプリ側の障害で失敗した | **接続は維持し、ログに出す。** 落とすとVercelの障害が村の全断になる。**この判断はPOに確認したい**（8節） |
+| 定期確認がアプリ側の障害で失敗した | **接続は維持し、ログに出す**（2026-08-13 PO判断）。落とすとVercelの障害が村の全断になる。**ただし無条件には維持しない。下の「失敗が続いた場合」を参照** |
 | ws-server が再起動した | 全接続が切れ、画面が券を取り直して繋ぎ直す。揮発メモリの方針どおり、失われるのは位置だけ |
+
+#### 定期確認の失敗が続いた場合（2026-08-13 に決めた）
+
+無条件に維持し続けると、無効化の仕組みそのものが機能しなくなる。段階を分ける。
+
+| 連続失敗 | 経過時間の目安 | 扱い |
+|---|---|---|
+| 1〜4回 | 〜4分 | **何もしない。** ログに1行出すだけ。一時的な障害はここで収まる |
+| 5回 | 5分 | ログを警告に上げる。**新しい接続は今までどおり受ける**（券の検証はHMACだけででき、アプリに依存しないため） |
+| **10回** | **10分** | **認証済みの接続を全て `close(4001)` で切る。** 以後、確認が1回成功するまで、券の検証を通った接続も**見るだけ扱い**にする |
+
+10分で切ると決めた理由:
+
+- 60秒の遅延を許容できるとした根拠は「**短時間の**障害なら在席の表示が古くなるだけ」だった。
+  10分続く障害は、その前提が崩れている
+- 切られた人は券を取り直して繋ぎ直す。**アプリが復旧していれば数秒で戻る**。
+  復旧していなければ券が取れないので、そもそも入れない状態と一致する
+- 見るだけ扱いに落とすことで、村は見えたままになる（画面が真っ白にならない）
+
+回数はコードの定数（`VERIFY_FAIL_WARN = 5` / `VERIFY_FAIL_CUT = 10`）にし、変えられるようにする。
 
 ### 未認証の接続（見るだけモード）をどう扱うか
 
@@ -732,7 +763,7 @@ CVE-2025-29927 について: Next.js 16.3.0 は修正済みのため、この脆
 
 | 事項 | 区分 | 内容 |
 |---|---|---|
-| `bigint` の `id` がセッションで文字列になるか | **未検証** | `pg` は `bigint` を文字列で返す。Auth.js のセッション内で `user.id` が `"3"` になる見込み。`actor.ts` で `Number()` に通す設計にしてあるが、**実装時に実測すること** |
+| `bigint` の `id` がセッションで文字列になるか | **実測済み（2026-08-13）** | **文字列で返る。** 素の `pg` もアダプタの `getUser` も `typeof id === "string"`（`scripts/probe-id-type.mjs`）。`auth.ts` の `session` コールバックで `Number()` に通している |
 | WSハンドシェイクでの SameSite Cookie の扱い | **確認できず** | ブラウザの WebSocket ハンドシェイクに `sameSite: lax` のCookieが送られるかを、公式ドキュメントで確認できなかった。設計はCookieに依存しないため結論は変わらない |
 | Auth.js の Cookie 既定値の公式ドキュメント | **確認できず（実装では確認済み）** | `authjs.dev/reference/core` には既定値の一覧が無い。`@auth/core@0.41.3` の `lib/utils/cookie.js` の実装から読み取った。**ドキュメントではなく実装が出典である**ことを明記する |
 | `OAuthAccountNotLinked` が tenko の構成で実際に出るか | **仮説** | アダプタの実装とAuth.jsのエラー定義からの推論。段階2で必ず実機で確認する |
@@ -778,3 +809,11 @@ CVE-2025-29927 について: Next.js 16.3.0 は修正済みのため、この脆
 ## 11. 変更ログ
 
 - 2026-08-13 初版作成。**設計のみ。実装・DDL実行は行っていない。** POの検収待ち
+- 2026-08-13 POの検収に合格。判断5件を反映した。
+  (1) `allowDangerousEmailAccountLinking` を承認（別の提供元を追加する場合は見直す旨を明記）
+  (2) `/api/notes` は開放するが**デモ用の利用者の分だけ**
+  (3) `/api/ws-verify` の失敗時は接続を維持。**連続10回（約10分）で切る段階を追加した**（CCが決定）
+  (4) 村に出すデモ用の利用者は20人前後。残りは一覧にのみ出す
+  (5) 見るだけモードの噴水は「押せるが中身は見えない」
+- 2026-08-13 段階1の実行にあわせ、`ALTER COLUMN display_name SET DEFAULT` を落とした
+  （既存の列の既定値を変える操作であり、実行条件に反するため）。`bigint` の実測結果を反映した
