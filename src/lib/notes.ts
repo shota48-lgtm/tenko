@@ -87,13 +87,27 @@ export async function deleteTodayNote(userId: number) {
 }
 
 // 村に出す一覧。今日の分だけを返すため、日付が変われば自然に空になる
+// 村に出す「今日やること」。
+//
+// 実在の利用者の分は daily_notes（日付ごと）から、
+// **デモ用の利用者の分は demo_presence.note（日付を持たない）から**取る。
+//
+// なぜ分けるか（Phase 5 作業0）:
+//   デモ用の吹き出しを daily_notes に入れていたところ、日付が変わると20人ぶんが全部消え、
+//   村が静かになる（＝見るだけで開いた人に何も伝わらなくなる）。
+//   デモ用の利用者は「今日」を持たない存在なので、日付のある表に置くのが誤りだった。
 export async function listTodayNotes(): Promise<Note[]> {
   const { rows } = await pool.query(
     `SELECT n.user_id, n.body, n.updated_at
        FROM daily_notes n
-       JOIN users u ON u.id = n.user_id AND u.deleted_at IS NULL
+       JOIN users u ON u.id = n.user_id AND u.deleted_at IS NULL AND u.is_demo = false
       WHERE n.note_date = (now() AT TIME ZONE $1)::date
-      ORDER BY n.user_id`,
+     UNION ALL
+     SELECT d.user_id, d.note AS body, now() AS updated_at
+       FROM demo_presence d
+       JOIN users u ON u.id = d.user_id AND u.deleted_at IS NULL AND u.is_demo = true
+      WHERE d.note IS NOT NULL
+     ORDER BY user_id`,
     [TENKO_TZ],
   );
   return rows.map((r) => ({ user_id: Number(r.user_id), body: r.body, updated_at: r.updated_at }));
@@ -103,15 +117,14 @@ export async function listTodayNotes(): Promise<Note[]> {
 //
 // 実在の利用者が書いた業務内容を、村を見ただけの人に見せない（Phase 5 段階4。POの判断）。
 // いまDBにあるのは検証データばかりで差は出ないが、実運用に入った瞬間に効く区別である。
+// **日付を見ない。** デモ用の吹き出しは日が変わっても消えない（作業0）
 export async function listDemoNotes(): Promise<Note[]> {
   const { rows } = await pool.query(
-    `SELECT n.user_id, n.body, n.updated_at
-       FROM daily_notes n
-       JOIN users u ON u.id = n.user_id AND u.deleted_at IS NULL
-      WHERE n.note_date = (now() AT TIME ZONE $1)::date
-        AND u.is_demo = true
-      ORDER BY n.user_id`,
-    [TENKO_TZ],
+    `SELECT d.user_id, d.note AS body, now() AS updated_at
+       FROM demo_presence d
+       JOIN users u ON u.id = d.user_id AND u.deleted_at IS NULL AND u.is_demo = true
+      WHERE d.note IS NOT NULL
+      ORDER BY d.user_id`,
   );
   return rows.map((r) => ({ user_id: Number(r.user_id), body: r.body, updated_at: r.updated_at }));
 }

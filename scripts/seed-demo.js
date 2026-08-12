@@ -148,19 +148,13 @@ const PLAN = [
   await db.query(`UPDATE users SET is_demo = true WHERE id = ANY($1)`, [targets.map((u) => Number(u.id))]);
   await db.query("DELETE FROM demo_presence");
   for (const p of placed) {
+    // 「今日やること」も demo_presence に入れる。**日付を持たせない**（作業0）。
+    // daily_notes（日付ごと）に入れていたときは、日が変わると吹き出しが全部消えた
     await db.query(
-      `INSERT INTO demo_presence (user_id, state, talk, room_id, x, y, color_index)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [p.id, p.state, p.talk, p.roomId, p.x, p.y, p.colorIndex],
+      `INSERT INTO demo_presence (user_id, state, talk, room_id, x, y, color_index, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [p.id, p.state, p.talk, p.roomId, p.x, p.y, p.colorIndex, p.note],
     );
-    if (p.note) {
-      await db.query(
-        `INSERT INTO daily_notes (user_id, note_date, body)
-         VALUES ($1, (now() AT TIME ZONE 'Asia/Tokyo')::date, $2)
-         ON CONFLICT (user_id, note_date) DO UPDATE SET body = EXCLUDED.body, updated_at = now()`,
-        [p.id, p.note],
-      );
-    }
   }
   const n = (await db.query("SELECT count(*)::int n FROM demo_presence")).rows[0].n;
   const m = (await db.query("SELECT count(*)::int n FROM users WHERE is_demo")).rows[0].n;
