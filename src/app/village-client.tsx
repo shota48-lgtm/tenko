@@ -113,6 +113,8 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
   const [noteSaved, setNoteSaved] = useState(false);
   const [autoAway, setAutoAway] = useState(false);
   const [debug, setDebug] = useState(false);
+  // セッションが切れた（開いたまま7日が過ぎた・DBの行が消された）。黙って古い画面を映し続けない
+  const [sessionLost, setSessionLost] = useState(false);
   // アバターを押して出すもの。自分なら操作、他人なら情報だけ
   const [picked, setPicked] = useState<{ id: number; x: number; y: number } | null>(null);
   // 一覧は既定で畳む。村が主役で、一覧は必要なときに開くもの
@@ -197,27 +199,40 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
     return send({ type: "presence.set", user: userRef.current, state, roomId: null, talk: talkStatus });
   }, [send, isGuest]);
 
+  // セッションが切れたとき。
+  //
+  // 段階3で、チャットが 401 を「送り直しても通らない4xx」に含めていて
+  // 書いた文が黙って消えていた。同じ形の失敗を村でも作らない。
+  // 401 を黙って捨てると、開いたままの画面が古い情報を映し続け、
+  // 操作だけが通らない状態になる（何が起きたか利用者に分からない）
+  const noteSessionLost = useCallback((status: number) => {
+    if (status === 401) setSessionLost(true);
+    return status === 401;
+  }, []);
+
   // 未読と勤怠の下書き。村に出すために定期的に取り直す
   const loadVillage = useCallback(async () => {
     try {
       const res = await fetch("/api/village");
+      if (noteSessionLost(res.status)) return;
       if (!res.ok) return;
       const d = await res.json();
       setUnread(d.unread ?? {});
       setDrafts(d.drafts ?? []);
     } catch { /* 取れなくても村は描く */ }
-  }, []);
+  }, [noteSessionLost]);
 
   const loadAnns = useCallback(async () => {
     try {
       const res = await fetch("/api/announcements");
+      if (noteSessionLost(res.status)) return;
       if (!res.ok) return;
       const d = await res.json();
       setAnns(d.announcements ?? []);
       setAnnUnread(Number(d.unread ?? 0));
       setAnnCanWrite(d.canWrite === true);
     } catch { /* 取れなくても村は描く */ }
-  }, []);
+  }, [noteSessionLost]);
 
   const loadNotes = useCallback(async () => {
     try {
@@ -615,9 +630,14 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
       .sort((a, b) => (order[a.state] - order[b.state]) || a.id - b.id);
   }, [users, people, notes]);
 
+  // 表示名はDBから引く（自己申告の名前を画面に出さない）。
+  //
+  // 未ログインの人には、実在の利用者の名前が配られない（/api/users がデモ用の分しか返さない）。
+  // そのとき「利用者3」のように利用者IDを出すと、名前の代わりにIDを配ることになる。
+  // 名前が引けない相手は「メンバー」とだけ出す（Phase 5 段階4）
   const nameOf = useCallback(
-    (id: number) => users.find((u) => u.id === id)?.displayName ?? "利用者" + id,
-    [users],
+    (id: number) => users.find((u) => u.id === id)?.displayName ?? (isGuest ? "メンバー" : "利用者" + id),
+    [users, isGuest],
   );
 
   // 村に置く名前と話しかけ可否のラベル。人物の座標に合わせて重ねる
@@ -642,14 +662,37 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
   // 村にいる人数。「メンバー」を押す動機を出すために添える
   const inVillage = roster.filter((r) => r.state !== "off").length;
 
-  // 噴水を押したとき。開いた時点で既読にする
+  // 噴水を押したとき。開いた時点で既読にする。
+  // 未ログインでも押せる（押せることは分かる）が、中身は見せない。
+  // お知らせは社内の連絡であり、村を見ただけの人に配るものではない（POの判断）
   const openAnns = async () => {
     setShowAnns(true);
+    if (isGuest) return;
     await fetch("/api/announcements", {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: "{}",
     }).catch(() => {});
     await loadAnns();
+  };
+
+  // ログアウト。Auth.js の signOut は Server Action か クライアント関数だが、
+  // ここは村の画面（Client Component）なので、素直に POST を投げる。
+  // CSRF トークンは Auth.js が Cookie と一緒に持っている（同一オリジンなので送られる）
+  const doSignOut = async () => {
+    try {
+      const c = await fetch("/api/auth/csrf").then((r) => r.json());
+      await fetch("/api/auth/signout", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ csrfToken: c.csrfToken, callbackUrl: "/" }).toString(),
+      });
+    } catch { /* 失敗しても、下の再読み込みで状態は正される */ }
+    // 村に「自分」が残らないよう、在席を消してから読み直す。
+    // router.refresh() で page.tsx（Server Component）が動き直し、
+    // セッションが無い状態＝見るだけの村として描かれる
+    send({ type: "presence.set", user: userRef.current, state: "off" });
+    setPicked(null);
+    router.refresh();
   };
 
   const postAnn = async () => {
@@ -740,6 +783,17 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
         )}
         {isGuest && (
           <Link href="/login" className="tk-btn px-2 py-0.5 text-[10px]">ログイン</Link>
+        )}
+        {/* セッションが切れたとき。黙って古い画面を映し続けない（段階3のチャットと同じ考え方）*/}
+        {sessionLost && !isGuest && (
+          <span
+            className="border border-[var(--tk-ink)] px-1.5 py-0.5 text-[10px] font-bold text-white"
+            style={{ background: "var(--tk-red)" }}
+            role="alert"
+          >
+            ログインの期限が切れました
+            <Link href="/login" className="ml-1 underline">入り直す</Link>
+          </span>
         )}
         {debug && (
           <span className="ml-auto flex items-center gap-2 text-[11px]">
@@ -1078,6 +1132,11 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
                       <Link href="/attendance" className={menuBtn}>勤怠の確認・修正申請</Link>
                       {canApprove && <Link href="/approvals" className={menuBtn}>承認する</Link>}
                       <button onClick={leaveVillage} className={menuBtn}>退勤（村から消える）</button>
+                      {/* ログアウトの導線。
+                          ヘッダではなくここに置いた。ヘッダは村の外の操作（接続の状態）を出す場所で、
+                          自分に対する操作（状態を変える・退勤する）はすべてこのメニューに集めてあるため。
+                          「退勤」の隣に置くことで、終わりの操作がひとまとまりになる */}
+                      <button onClick={() => void doSignOut()} className={menuBtn}>ログアウト</button>
                     </div>
                     <p className="text-[10px]" style={{ color: "var(--tk-ink-soft)" }}>
                       表示名は管理者が決めます（この画面では変えられません）
@@ -1089,7 +1148,23 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
                     <p>
                       今日やること: {notes[picked.id] ? notes[picked.id] : <span style={{ color: "var(--tk-ink-soft)" }}>未記入</span>}
                     </p>
-                    {pickedPerson && confirmCall !== picked.id && (
+                    {/* デモ用の利用者には呼びかけない。
+                        押せてしまうと「返事が来ない＝壊れている」に見える。
+                        押す前に、返事をしない人であることを伝える（Phase 5 段階5）*/}
+                    {pickedPerson?.demo && (
+                      <p className="border border-[var(--tk-ink)] p-1.5 text-[11px] leading-4"
+                         style={{ background: "var(--tk-paper-2)" }}>
+                        この人は、村の様子を見せるために置いてあるデモの利用者です。
+                        呼びかけても返事はしません。
+                      </p>
+                    )}
+                    {isGuest && !pickedPerson?.demo && (
+                      <p className="border border-[var(--tk-ink)] p-1.5 text-[11px] leading-4"
+                         style={{ background: "var(--tk-paper-2)" }}>
+                        呼びかけるにはログインが必要です。
+                      </p>
+                    )}
+                    {pickedPerson && !pickedPerson.demo && !isGuest && confirmCall !== picked.id && (
                       <button onClick={() => callTo(picked.id)} className="tk-btn w-full justify-center text-xs">
                         呼びかける
                         {(pickedPerson.talk ?? "ok") === "later" && "（後でならOK）"}
@@ -1196,12 +1271,19 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
               <button onClick={() => setShowAnns(false)} className="tk-btn tk-btn-quiet ml-auto px-2 py-0.5 text-xs">閉じる</button>
             </div>
             <ul className="flex-1 overflow-y-auto">
-              {anns.length === 0 && (
+              {/* 未ログインには中身を出さない。押せることは分かるが、読めない */}
+              {isGuest && (
+                <li className="px-3 py-6 text-center text-xs" style={{ color: "var(--tk-ink-soft)" }}>
+                  <p className="mb-2">村のお知らせは、ログインすると読めます。</p>
+                  <Link href="/login" className="tk-btn px-3 py-1 text-xs">ログイン</Link>
+                </li>
+              )}
+              {!isGuest && anns.length === 0 && (
                 <li className="px-3 py-6 text-center text-xs" style={{ color: "var(--tk-ink-soft)" }}>
                   お知らせはまだありません
                 </li>
               )}
-              {anns.map((a) => (
+              {!isGuest && anns.map((a) => (
                 <li key={a.id} className="tk-sep px-3 py-2">
                   <div className="flex items-baseline gap-2">
                     <span className="text-xs font-bold">{a.displayName}</span>

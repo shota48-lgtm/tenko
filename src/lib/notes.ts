@@ -99,6 +99,23 @@ export async function listTodayNotes(): Promise<Note[]> {
   return rows.map((r) => ({ user_id: Number(r.user_id), body: r.body, updated_at: r.updated_at }));
 }
 
+// 未ログインの人に返す「今日やること」。**デモ用の利用者の分だけ。**
+//
+// 実在の利用者が書いた業務内容を、村を見ただけの人に見せない（Phase 5 段階4。POの判断）。
+// いまDBにあるのは検証データばかりで差は出ないが、実運用に入った瞬間に効く区別である。
+export async function listDemoNotes(): Promise<Note[]> {
+  const { rows } = await pool.query(
+    `SELECT n.user_id, n.body, n.updated_at
+       FROM daily_notes n
+       JOIN users u ON u.id = n.user_id AND u.deleted_at IS NULL
+      WHERE n.note_date = (now() AT TIME ZONE $1)::date
+        AND u.is_demo = true
+      ORDER BY n.user_id`,
+    [TENKO_TZ],
+  );
+  return rows.map((r) => ({ user_id: Number(r.user_id), body: r.body, updated_at: r.updated_at }));
+}
+
 export async function getTodayNote(userId: number): Promise<Note | null> {
   const { rows } = await pool.query(
     `SELECT user_id, body, updated_at FROM daily_notes

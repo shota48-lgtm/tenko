@@ -1,15 +1,20 @@
 // 村の一覧に出す利用者。
 //
-// 誰が叩けるか: 誰でも。返すのは表示名だけで、役割・上長・勤怠は返さない。
-// 表示名は在席の配信（WebSocket）で既に全員に見えている情報であり、ここで増えるものはない。
+// 誰が叩けるか（Phase 5 段階4）:
+//   ログインしている人 : 全員の表示名。村で誰が誰か分かる必要がある
+//   未ログインの人     : **デモ用の利用者の表示名だけ**
+//
+// 返すのは表示名だけで、役割・上長・勤怠・メールアドレスは返さない。
+// 絞り込みの規則は public-view.ts に集めてある（見るだけモードの分岐を散らさない）。
 import { NextResponse } from "next/server";
-import { pool } from "@/lib/db";
+import { currentActor } from "@/lib/actor";
+import { allowPublic, usersFor } from "@/lib/public-view";
 
 export async function GET() {
-  const { rows } = await pool.query(
-    `SELECT id, display_name FROM users WHERE deleted_at IS NULL ORDER BY id ASC`,
-  );
-  return NextResponse.json({
-    users: rows.map((r) => ({ id: Number(r.id), displayName: r.display_name })),
-  });
+  const actor = await currentActor();
+  if (!actor) {
+    const stop = await allowPublic();
+    if (stop) return stop;
+  }
+  return NextResponse.json({ users: await usersFor(actor !== null) });
 }

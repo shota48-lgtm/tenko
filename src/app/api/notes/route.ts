@@ -7,16 +7,28 @@
 //
 // 日付はサーバーが決める。リクエストから日付を受け取る口は作らない。
 import { NextRequest, NextResponse } from "next/server";
-import { sanitizeNote, upsertTodayNote, deleteTodayNote, listTodayNotes, getTodayNote, NOTE_MAX } from "@/lib/notes";
+import { sanitizeNote, upsertTodayNote, deleteTodayNote, listTodayNotes, listDemoNotes, getTodayNote, NOTE_MAX } from "@/lib/notes";
 import { currentActor, unauthorized, assertSameOrigin } from "@/lib/actor";
+import { allowPublic } from "@/lib/public-view";
 
-// 全員分の一覧を返す経路かどうか。
-// `?mine=1` が付いていれば自分の分。付いていなければ全員分（未認証でも読める）
+// `?mine=1` が付いていれば自分の分。付いていなければ村に出す一覧。
+//
+// 一覧は誰が見るかで中身が変わる（Phase 5 段階4。POの判断）:
+//   ログインしている人 : 全員分
+//   未ログインの人     : **デモ用の利用者の分だけ**
+//     実在の利用者が書いた業務内容を、村を見ただけの人に見せない
 export async function GET(req: NextRequest) {
+  const actor = await currentActor();
+
   if (req.nextUrl.searchParams.get("mine") !== "1") {
+    if (!actor) {
+      const stop = await allowPublic();
+      if (stop) return stop;
+      return NextResponse.json({ notes: await listDemoNotes(), max: NOTE_MAX });
+    }
     return NextResponse.json({ notes: await listTodayNotes(), max: NOTE_MAX });
   }
-  const actor = await currentActor();
+
   if (!actor) return unauthorized();
   return NextResponse.json({ note: await getTodayNote(actor.id), max: NOTE_MAX });
 }

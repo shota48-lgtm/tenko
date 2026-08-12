@@ -25,10 +25,14 @@ const API = path.join(SRC, "app", "api");
 // 開けるときは、この一覧に足す判断を明示的に行う（設計書4節）
 const PUBLIC_ROUTES = [
   "app/api/rooms/route.ts",            // 建物の一覧。村を描くのに要る
-  "app/api/users/route.ts",            // 表示名だけ
-  "app/api/notes/route.ts",            // 吹き出し。GET(全員分)のみ開放。段階4でデモ用だけに絞る
+  "app/api/users/route.ts",            // 表示名だけ。未ログインにはデモ用の分だけ
+  "app/api/notes/route.ts",            // 吹き出し。未ログインにはデモ用の分だけ
+  "app/api/demo-presence/route.ts",    // デモ用の利用者の位置。ws-server が引く
   "app/api/auth/[...nextauth]/route.ts", // Auth.js の入口。ここが閉じたらログインできない
 ];
+// 見るだけモードの切り替え（TENKO_PUBLIC_VIEW）を通さなければならない経路。
+// Auth.js の入口だけは例外（ここを止めるとログインできなくなる）
+const MUST_GUARD = PUBLIC_ROUTES.filter((p) => !p.includes("[...nextauth]"));
 
 const problems = [];
 const files = [];
@@ -63,6 +67,11 @@ for (const f of routeFiles) {
 
   if (!isPublic && !hasActor) {
     problems.push("認証も開放の宣言も無い経路: src/" + r);
+  }
+  // 開放している経路は、見るだけモードの切り替えを必ず通す。
+  // 通っていないと TENKO_PUBLIC_VIEW=0 で止まらない経路が残る
+  if (MUST_GUARD.includes(r) && !/allowPublic\s*\(/.test(text)) {
+    problems.push("開放しているのに allowPublic() を通っていない: src/" + r);
   }
   // 書き込みの経路は、開放されていても currentActor が要る
   const writes = [...text.matchAll(/export\s+(?:async\s+)?(?:function|const)\s+(POST|PUT|DELETE|PATCH)\b/g)]
