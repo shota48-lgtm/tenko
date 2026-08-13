@@ -1,0 +1,35 @@
+# Render の設定（ws-server だけを置く）。
+#
+# なぜ Render か: 無料枠がカード不要で、Node のサーバーをそのまま動かせるため（2026-08-13 PO判断）。
+# アプリ本体（Next.js）は Vercel に置く。ここには含めない。
+#
+# 無料枠の性質（承知のうえで使う）:
+#   - 15分間まったく受信が無いと停止する。次の接続で起動し直す
+#   - **2026年2月の変更で、WebSocket のメッセージも停止を先送りする。** 誰かが村にいる限り止まらない
+#   - 常時起動させるための定期ping は行わない（規約と competing する手は採らない）
+#
+# 停止している間も村が空にならないよう、デモ用の在席は
+# アプリ側が最初のHTMLに載せて配る（src/app/page.tsx）。
+services:
+  - type: web
+    name: tenko-ws
+    runtime: node
+    plan: free
+    region: singapore          # 日本から最も近い無料枠の地域
+    rootDir: ws-server
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /healthz
+    envVars:
+      # 値は Render の画面で入力する。**このファイルには書かない**
+      - key: TENKO_WS_TICKET_SECRET
+        sync: false            # アプリ（Vercel）と同じ値を入れること
+      - key: TENKO_WS_INTERNAL_TOKEN
+        sync: false            # 同上
+      - key: WS_NOTIFY_TOKEN
+        sync: false            # 同上（投稿の通知をアプリから受けるための合言葉）
+      - key: TENKO_API
+        sync: false            # アプリのURL（例: https://tenko.vercel.app）
+      - key: TENKO_PUBLIC_VIEW
+        value: "1"             # 見るだけモード。止めるときは 0
+      # PORT は Render が自動で入れる。ws-server はそれを読む
