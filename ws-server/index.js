@@ -24,6 +24,7 @@
 //   ブラウザには close code が届かず 1006 になる（spike/ws-auth-01 で実測）。
 //   判定は覚えるだけにし、断るのは connection の中で close(4003) / close(4004) による。
 
+const http = require("http");
 const { WebSocketServer } = require("ws");
 const geo = require("./geometry");
 const { verifyTicket } = require("./ticket");
@@ -70,8 +71,25 @@ const VIEWER_ALLOWED = ["presence.set", "presence.sync", "presence.move", "call.
 // request をキーにする（同じリクエストが connection にも渡ってくる）
 const pendingAuth = new Map();
 
+// HTTP のサーバーを自分で持ち、その上に WebSocket を載せる（Phase 5 段階7）。
+//
+// なぜ必要か: Render の無料枠は「HTTPで応答すること」を見て生死を判定する。
+//   WebSocketServer に port を渡す形だと、普通のHTTPには 400 しか返さず、
+//   健康確認に落ちる。/healthz を返す口を用意しておく。
+//   **HTTPの受信も停止の先送りになる**ので、起こす経路が1つ増える意味もある。
+const httpServer = http.createServer((req, res) => {
+  if (req.url === "/healthz") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    // 中身に意味は持たせない。動いているかどうかだけを返す
+    res.end("ok " + wss.clients.size);
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("tenko ws-server");
+});
+
 const wss = new WebSocketServer({
-  port: PORT,
+  server: httpServer,
   // **ここでは断らない。判定して覚えるだけ。**（設計書6節。spike/ws-auth-01 の実測にもとづく）
   //
   // 応答は常に "tenko.v1" を返す。券は返さない。
@@ -175,7 +193,14 @@ async function verifySessions() {
     bySession.get(c.sessionId).push(c);
   }
   if (bySession.size === 0) {
-    // 確認する相手がいないときは、失敗の数え上げもしない
+    // **認証済みの接続が0本のときは投げない**（PO判断。Phase 5 段階7）。
+    //   確認する対象が無いときに確認する意味がない。
+    //   無料枠では、無駄な通信そのものが停止の判定に影響する。
+    //   誰もログインしていない夜間・休日に投げ続けない。
+    //
+    // **失敗の数え上げもしない。**
+    //   投げていないものを失敗として数えると、誰かが最初にログインした瞬間に
+    //   切断の条件（連続10回）を満たしてしまう
     return;
   }
 
@@ -602,4 +627,10 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-console.log("ws-server listening on port " + PORT + " / API=" + API);
+// Render では 0.0.0.0 で待ち受ける必要がある（既定でそうなるが、明示しておく）
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log("ws-server listening on port " + PORT + " / API=" + API);
+  console.log("  見るだけモード: " + (PUBLIC_VIEW ? "有効" : "無効")
+    + " / 券の鍵: " + (process.env.TENKO_WS_TICKET_SECRET ? "あり" : "**無し（券が通らない）**")
+    + " / 共有秘密: " + (INTERNAL_TOKEN ? "あり" : "**無し（無効化の確認ができない）**"));
+});

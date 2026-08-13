@@ -92,7 +92,15 @@ const menuBtnOn = "tk-btn tk-btn-on w-full justify-start text-xs";
 // 画面側で /api/rooms を取りに行っていたところ、到着まで1.4秒かかり（実測）、
 // その間は建物のない村が描かれていた。POが開いた直後の画面がこの状態だった。
 // 建物の配置は村の骨組みであり、後から届く情報にしてはいけない。
-export default function VillagePage({ initialRooms, me: sessionMe }: { initialRooms: Room[]; me: Me | null }) {
+export default function VillagePage({
+  initialRooms, initialPeople, initialCounts, me: sessionMe,
+}: {
+  initialRooms: Room[];
+  // デモ用の在席。ws-server が寝ていても村に人がいるように、最初のHTMLに載せて渡す（段階7）
+  initialPeople: Presence[];
+  initialCounts: RoomCounts;
+  me: Me | null;
+}) {
   const router = useRouter();
   // ログインしていない人は「見るだけ」。村は見えるが、自分のアバターは出ない
   const isGuest = sessionMe === null;
@@ -101,8 +109,10 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
   const [variant, setVariant] = useState<"a" | "b" | "c">(ACTIVE_VARIANT);
   const [rooms] = useState<Room[]>(initialRooms);
   const [users, setUsers] = useState<User[]>([]);
-  const [people, setPeople] = useState<Presence[]>([]);
-  const [counts, setCounts] = useState<RoomCounts>({});
+  // 初期値はサーバーから渡ったデモ用の在席。WS が繋がれば丸ごと置き換わる。
+  // 置き換えても同じ座標・同じ状態が入るため、村はちらつかない（実機で確認）
+  const [people, setPeople] = useState<Presence[]>(initialPeople);
+  const [counts, setCounts] = useState<RoomCounts>(initialCounts);
   const [notes, setNotes] = useState<NoteMap>({});
   const [conn, setConn] = useState<"接続中" | "切断" | "再接続中">("再接続中");
   const [myState, setMyState] = useState<Presence["state"]>("idle");
@@ -115,6 +125,10 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
   const [debug, setDebug] = useState(false);
   // セッションが切れた（開いたまま7日が過ぎた・DBの行が消された）。黙って古い画面を映し続けない
   const [sessionLost, setSessionLost] = useState(false);
+  // 一度でも WS が繋がったか。最初の接続と、繋がったあとの切断を区別するために持つ
+  const [everConnected, setEverConnected] = useState(false);
+  // 在席の同期が止まった（auth.expired を受けた）。村が空に見えることと区別する
+  const [syncStopped, setSyncStopped] = useState(false);
   // アバターを押して出すもの。自分なら操作、他人なら情報だけ
   const [picked, setPicked] = useState<{ id: number; x: number; y: number } | null>(null);
   // 一覧は既定で畳む。村が主役で、一覧は必要なときに開くもの
@@ -309,6 +323,9 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
         delay = 1000;
         setConn("接続中");
         setStale(false);
+        setEverConnected(true);
+        // 繋がり直したら、同期が止まっている表示は消す
+        if (ticket) setSyncStopped(false);
         announce(myStateRef.current, talkRef.current);
         ws.send(JSON.stringify({ type: "presence.sync" }));
       };
@@ -339,8 +356,12 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
             setAnswered({ id: Number(d.from?.id), text: a });
           } else if (d.type === "auth.expired" || d.type === "auth.rejected") {
             // セッションが無効になった（4001）／券が通らなかった（4003）。
-            // 続けて onclose が来るので、そこで券を取り直して繋ぎ直す
+            // 続けて onclose が来るので、そこで券を取り直して繋ぎ直す。
+            //
+            // **画面にも出す（段階7）。** 黙って切ると、村が静かに空になり、
+            // 勤怠のアプリで「誰も働いていない」という誤った主張になる
             console.warn("[ws] " + d.type + ": " + d.reason);
+            if (!isGuest) setSyncStopped(true);
           }
         } catch { /* 解釈できない通知は捨てる */ }
       };
@@ -787,10 +808,19 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
 
   return (
     <main className="min-h-screen" style={{ background: "var(--tk-paper)" }}>
-      {/* ヘッダはアプリ名だけ。正常な接続は既定なので出さない（切断のときだけ赤く出す） */}
+      {/* ヘッダはアプリ名だけ。正常な接続は既定なので出さない。
+          出し分け（段階7）:
+            - 最初の接続まで: 「接続しています」を静かに出す（無言で待たせない）
+            - 見るだけの人:   それ以上は出さない。**元々動かせないので、接続の有無は関係がない**
+            - ログイン済み:   繋がらなくなったら赤く出す。動かせるはずのものが動かないため */}
       <header className="tk-head flex items-center gap-3 px-4 py-1.5">
         <h1 className="text-sm font-bold tracking-widest">tenko</h1>
-        {conn !== "接続中" && (
+        {conn !== "接続中" && !everConnected && (
+          <span className="px-1.5 py-0.5 text-[10px] tk-soft" role="status">
+            接続しています…
+          </span>
+        )}
+        {conn !== "接続中" && everConnected && !isGuest && (
           <span
             className="border border-[var(--tk-ink)] px-2 py-0.5 text-[11px] font-bold text-white"
             style={{ background: "var(--tk-red)" }}
@@ -798,6 +828,18 @@ export default function VillagePage({ initialRooms, me: sessionMe }: { initialRo
           >
             {conn === "切断" ? "切断されました" : "つなぎ直しています"}
             {stale && "（表示は切断前のものです）"}
+          </span>
+        )}
+        {/* 在席の同期が止まったとき（段階7）。
+            村が空に見えることと、同期が止まっていることを区別できるようにする。
+            勤怠のアプリで村が空に見えると「誰も働いていない」という誤った主張になる */}
+        {syncStopped && (
+          <span
+            className="border border-[var(--tk-ink)] px-2 py-0.5 text-[11px] font-bold"
+            style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
+            role="alert"
+          >
+            在席の同期が止まっています（村の人数は実際と違うかもしれません）
           </span>
         )}
         {/* 段階2までは「お試し版・ログインなし（誰にでもなりすませます）」を常時出していた。
