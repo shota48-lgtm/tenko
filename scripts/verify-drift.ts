@@ -14,8 +14,9 @@ const PLAN: [number, { anchorX: number; anchorY: number; amp: number }][] = JSON
 );
 const ROOMS: Room[] = JSON.parse(process.env.DRIFT_ROOMS ?? "[]");
 
-const FPS = 60;
-const SECONDS = 30;
+// 標本の粗さで見逃していないかを確かめられるよう、外から変えられるようにする
+const FPS = Number(process.env.DRIFT_FPS ?? 60);
+const SECONDS = Number(process.env.DRIFT_SECONDS ?? 30);
 const t0 = 1_700_000_000_000;   // 固定の起点。決定的であることを確かめるため
 
 let frames = 0;
