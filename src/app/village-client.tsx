@@ -25,6 +25,7 @@ import {
   VILLAGE_W, VILLAGE_H, PERSON_SIZE,
   type Presence, type Room, type NoteMap, type TalkStatus, type RoomCounts, type OccupantsMode,
 } from "@/village/render";
+import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/village/demo-drift";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 村の拡大率。
@@ -32,6 +33,8 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 2倍で固定していたところ、村（640x416）が 1280x832 になり、画面に収まらず縦にスクロールした。
 // 全員がどこにいるか一目で分かることが村の唯一の価値なので、既定は「全体が入る」にする。
 // 整数倍でないと1ドットの大きさが揃わないが、収まらないよりは良い（PHASE49_LOG.md に記載）。
+// 「誰も漂わせない」状態。性能比較のときに使い回す（毎フレーム作らない）
+const EMPTY_DRIFT_PLAN: DriftPlan = new Map();
 const ZOOM_CLOSE = 2;
 const ZOOM_MIN = 1.2;
 // 選べる状態。「会議中(talking)」は入っていない。建物に入れば自動でそうなるため（Phase 4.8）
@@ -106,6 +109,10 @@ export default function VillagePage({
   const isGuest = sessionMe === null;
   const me = sessionMe ?? GUEST;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 村の canvas と、その上に重ねる名前・吹き出しを収めている入れ物。
+  // 漂わせるとき、canvas と重ね物を同じ量だけ動かすために掴んでおく
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const driftPlanRef = useRef<DriftPlan>(new Map());
   const [variant, setVariant] = useState<"a" | "b" | "c">(ACTIVE_VARIANT);
   const [rooms] = useState<Room[]>(initialRooms);
   const [users, setUsers] = useState<User[]>([]);
@@ -526,23 +533,96 @@ export default function VillagePage({
     return off;
   }, [variant, quietDeco]);
 
+  // デモの人を漂わせる計画（拠点と安全振幅）。
+  // **毎フレーム作り直さない。** 在席が更新されたときだけ計算し、ref に置く。
+  // state にすると再レンダリングが走り、描画ループと競合する。
+  useEffect(() => {
+    driftPlanRef.current = buildDriftPlan(rooms, people);
+    // 試験で「誰にどれだけの振幅が付いたか」を数値で確かめるための覗き口
+    (window as unknown as { __driftPlan?: [number, { anchorX: number; anchorY: number; amp: number }][] })
+      .__driftPlan = [...driftPlanRef.current.entries()];
+  }, [rooms, people]);
+
   useEffect(() => {
     const cv = canvasRef.current;
     if (!cv) return;
     const ctx = cv.getContext("2d");
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, VILLAGE_W, VILLAGE_H);
-    if (ground) ctx.drawImage(ground, 0, 0);
-    drawVillage(ctx, sheet(variant), rooms, people, !ground, counts, occupants, dropTarget, unread, me.id);
-    drawNoteMarks(ctx, sheet(variant), layout);
-    // 最初の数回の描画の状態を残す。
-    // 「開いた直後に建物が無い」を後から測るための記録で、5回で止まる（増え続けない）
-    const w = window as unknown as { __villagePaints?: { t: number; rooms: number; people: number }[] };
-    w.__villagePaints ??= [];
-    if (w.__villagePaints.length < 5) {
-      w.__villagePaints.push({ t: Math.round(performance.now()), rooms: rooms.length, people: people.length });
-    }
+
+    let raf = 0;
+    let first = true;
+
+    const paint = () => {
+      const dbg = window as unknown as { __driftOff?: boolean };
+      // 漂いを止めた状態（＝改修前と同じ絵）と、所要時間を同じ土俵で比べるための切り替え。
+      // 画面には出さない。試験で `window.__driftOff = true` と置いて計測する
+      const plan = dbg.__driftOff ? EMPTY_DRIFT_PLAN : driftPlanRef.current;
+      const t = Date.now();
+      const p0 = performance.now();
+      // **people の state は書き換えない。** 描画用に複製し、対象者の x, y だけ差し替える。
+      // サーバー由来の値を汚すと、呼びかけ・定員・ドラッグの判定が壊れる
+      const shown = applyDrift(people, plan, t);
+      ctx.clearRect(0, 0, VILLAGE_W, VILLAGE_H);
+      if (ground) ctx.drawImage(ground, 0, 0);
+      const t0 = performance.now();
+      drawVillage(ctx, sheet(variant), rooms, shown, !ground, counts, occupants, dropTarget, unread, me.id);
+      const dt = performance.now() - t0;
+      drawNoteMarks(ctx, sheet(variant), layout);
+
+      // 名前と吹き出しは canvas ではなく DOM にある。
+      // canvas だけずらすとラベルが置き去りになるため、同じ量だけ動かす。
+      // React を経由せず style を直接書く（毎フレームの再レンダリングを避けるため）
+      const host = stageRef.current;
+      if (host) {
+        const offs = driftOffsetsAt(plan, t);
+        for (const el of Array.from(host.querySelectorAll<HTMLElement>("[data-drift-id]"))) {
+          const d = offs.get(Number(el.dataset.driftId));
+          el.style.translate = d ? `${d.dx * SCALE}px ${d.dy * SCALE}px` : "";
+        }
+      }
+
+      const w = window as unknown as {
+        __villagePositions?: [number, number | null, number | null][];
+        __villagePaintCount?: number;
+        __villagePaints?: { t: number; rooms: number; people: number }[];
+        __villageDrawMs?: number[];
+        __villagePaintMs?: number[];
+      };
+      // いま描いた座標。**上書きで持つ（積まない）。**
+      // 「動いていないはずの人が動いていないこと」を目でなく数値で確かめるために置く
+      // 描いた枚数。タブを裏にしたときに止まっているかを数で確かめるために置く
+      w.__villagePaintCount = (w.__villagePaintCount ?? 0) + 1;
+      w.__villagePositions = shown.map((p) => [Number(p.id), p.x ?? null, p.y ?? null]);
+      // drawVillage 1回の所要時間と、1フレーム全体の所要時間。性能の比較（T7）に使う。
+      // 120件で頭打ちにする（増え続けない）
+      w.__villageDrawMs ??= [];
+      if (w.__villageDrawMs.length < 120) w.__villageDrawMs.push(dt);
+      w.__villagePaintMs ??= [];
+      if (w.__villagePaintMs.length < 120) w.__villagePaintMs.push(performance.now() - p0);
+      // 最初の数回の「描画の状態」を残す。
+      // 「開いた直後に建物が無い」を後から測るための記録で、5回で止まる（増え続けない）。
+      // rAF で毎フレーム描くようになったため、**状態が変わった直後の1回だけ**記録する
+      // （毎フレーム積むと、開いて0.1秒で5件が埋まって意味を失う）
+      if (first) {
+        first = false;
+        w.__villagePaints ??= [];
+        if (w.__villagePaints.length < 5) {
+          w.__villagePaints.push({ t: Math.round(performance.now()), rooms: rooms.length, people: people.length });
+        }
+      }
+    };
+
+    const loop = () => { paint(); raf = requestAnimationFrame(loop); };
+    const start = () => { if (!raf) raf = requestAnimationFrame(loop); };
+    const stop = () => { if (raf) { cancelAnimationFrame(raf); raf = 0; } };
+    // タブが裏にある間は回さない。見えていない絵に電池を使わない
+    const onVis = () => { if (document.hidden) stop(); else { paint(); start(); } };
+    document.addEventListener("visibilitychange", onVis);
+
+    paint();                       // 最初の1枚は待たずに出す
+    if (!document.hidden) start();
+    return () => { document.removeEventListener("visibilitychange", onVis); stop(); };
   }, [rooms, people, variant, layout, ground, counts, occupants, dropTarget, unread, me.id]);
 
   // ---- 移動（作業1）----
@@ -555,9 +635,23 @@ export default function VillagePage({
     return { x: (e.clientX - rect.left) / SCALE, y: (e.clientY - rect.top) / SCALE };
   };
 
+  // 当たり判定に使う「いま描かれている位置」。
+  //
+  // 漂わせるのは描画だけなので、`people`（サーバー由来の値）を使って当てると
+  // 見えている人と最大40pxずれ、押しても何も起きない（実測で判明）。
+  // 押す・乗せるの判定だけ、描画と同じ位置で行う。**state は書き換えない。**
+  // 掴めるのは自分だけで、自分は漂わせないため、ドラッグの判定には影響しない。
+  const peopleAsDrawn = () => applyDrift(people, driftPlanRef.current, Date.now());
+  /** その人の、拠点からのいまのずれ（漂っていない人は 0） */
+  const driftOf = (id: number) => {
+    const d = driftPlanRef.current.get(id);
+    if (!d) return { dx: 0, dy: 0 };
+    return driftOffsetsAt(driftPlanRef.current, Date.now()).get(id) ?? { dx: 0, dy: 0 };
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const at = toVillage(e);
-    const person = hitPerson(rooms, people, at.x, at.y);
+    const person = hitPerson(rooms, peopleAsDrawn(), at.x, at.y);
     if (person && Number(person.id) === me.id) {
       const spot = layout.spots.find((s) => Number(s.p.id) === me.id);
       dragRef.current = {
@@ -593,7 +687,7 @@ export default function VillagePage({
     // 掴んでいないときは、乗せているものを拾う（部屋名・定員はここでしか出さない）
     const r = hitBuilding(rooms, at.x, at.y);
     setHoverRoom(r ? r.id : null);
-    const p = hitPerson(rooms, people, at.x, at.y);
+    const p = hitPerson(rooms, peopleAsDrawn(), at.x, at.y);
     setHoverPerson(p ? Number(p.id) : null);
   };
 
@@ -634,10 +728,12 @@ export default function VillagePage({
     }
     // 掴んでいなければ、押した扱い
     const at = toVillage(e);
-    const person = hitPerson(rooms, people, at.x, at.y);
+    const person = hitPerson(rooms, peopleAsDrawn(), at.x, at.y);
     if (person) {
       const spot = layout.spots.find((s) => Number(s.p.id) === Number(person.id));
-      setPicked({ id: Number(person.id), x: spot?.x ?? at.x, y: spot?.y ?? at.y });
+      // 案内を出す位置も、拠点ではなく見えている位置に合わせる
+      const o = driftOf(Number(person.id));
+      setPicked({ id: Number(person.id), x: (spot?.x ?? at.x) + o.dx, y: (spot?.y ?? at.y) + o.dy });
       return;
     }
     setPicked(null);
@@ -939,7 +1035,7 @@ export default function VillagePage({
         {/* 全体を見るときはスクロールさせない。一覧性が村の価値なので、
             スクロールが出た時点で「全員がどこにいるか」が一目で分からなくなる */}
         <div className={"tk-panel bg-black " + (zoom === "close" ? "max-h-[calc(100vh-7rem)] overflow-auto" : "")}>
-          <div className="relative" style={{ width: VILLAGE_W * SCALE, height: VILLAGE_H * SCALE }}>
+          <div ref={stageRef} className="relative" style={{ width: VILLAGE_W * SCALE, height: VILLAGE_H * SCALE }}>
             <canvas
               ref={canvasRef}
               width={VILLAGE_W}
@@ -968,6 +1064,9 @@ export default function VillagePage({
             {tags.map((t) => (
               <div
                 key={t.id}
+                // 漂わせる対象なら、rAF ループが `translate` を書き込んでアバターに追従させる。
+                // `transform` は既に使っているため、独立した CSS の `translate` を使う（上書きしない）
+                data-drift-id={t.id}
                 className="pointer-events-none absolute flex items-center gap-0.5 whitespace-nowrap"
                 style={{
                   // 村の端でラベルが切れないよう、左右を村の中に収める
@@ -1009,6 +1108,8 @@ export default function VillagePage({
               return (
                 <div
                   key={b.userId}
+                  // 名前と同じく、漂う人の吹き出しは同じ量だけずらす（置き去りにしない）
+                  data-drift-id={b.userId}
                   className="pointer-events-none absolute overflow-hidden border border-[var(--tk-ink)]"
                   style={{
                     // 配置の計算が決めた位置に置く。
