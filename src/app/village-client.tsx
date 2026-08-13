@@ -335,9 +335,33 @@ export default function VillagePage({
           if (d.type === "presence.list") {
             // 同じ利用者が複数の端末から接続していても、村では1人として扱う
             const byId = new Map<number, Presence>();
+            // **サーバーが最初のHTMLに載せたデモ用の人を、下敷きとして置く（段階7）。**
+            //
+            // WS の一覧で丸ごと置き換える形にしていたところ、
+            // ws-server がアプリに到達できない状態（デモ用の一覧を取れない）で繋がると、
+            // **空の一覧が届いて村が空になった**（実機で確認）。
+            // 村が空に見えることは、勤怠のアプリでは「誰も働いていない」という誤った主張になる。
+            //
+            // デモ用の人はDBの行そのもので、生きている人のように増減しない。
+            // WS が同じIDを送ってきたら、そちらで上書きされる（下の for が後に回る）
+            for (const p of initialPeople) byId.set(Number(p.id), p);
             for (const p of (d.users ?? []) as Presence[]) byId.set(Number(p.id), { ...p, id: Number(p.id) });
-            setPeople(Array.from(byId.values()));
-            if (d.rooms) setCounts(d.rooms as RoomCounts);
+            const merged = Array.from(byId.values());
+            setPeople(merged);
+            if (d.rooms) {
+              // 建物の人数は、実際に描く人から数え直す。
+              // サーバーの数字をそのまま使うと、上の下敷きで足した人のぶんだけ
+              // 「帯は空なのに中に人がいる」状態になる
+              const counts = d.rooms as RoomCounts;
+              const fixed: RoomCounts = {};
+              for (const [id, c] of Object.entries(counts)) {
+                fixed[Number(id)] = {
+                  ...c,
+                  used: merged.filter((p) => Number(p.roomId) === Number(id)).length,
+                };
+              }
+              setCounts(fixed);
+            }
           } else if (d.type === "presence.denied") {
             // 満員・不正な座標など。押した本人にだけ返る
             setDenied(String(d.reason ?? "移動できませんでした"));
@@ -384,7 +408,7 @@ export default function VillagePage({
       if (timer) clearTimeout(timer);
       wsRef.current?.close();
     };
-  }, [announce, isGuest]);
+  }, [announce, isGuest, initialPeople]);
 
   // 断られた理由・呼びかけの結果は数秒で消す。画面に残し続けると邪魔になる
   useEffect(() => {

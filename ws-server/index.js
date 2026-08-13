@@ -450,6 +450,13 @@ wss.on("connection", (ws, req) => {
     return;
   }
 
+  // 券は正しいのに、無効化の確認ができないために見るだけへ落とした場合は、
+  // **そのことを画面に伝える**（段階7）。黙って落とすと、
+  // 利用者は村にいるつもりで、実際にはいない状態になる
+  if (!ws.isNotifier && auth.why === "無効化の確認ができないため見るだけ扱い") {
+    ws.send(JSON.stringify({ type: "auth.expired", reason: "verify unavailable" }));
+  }
+
   if (!ws.isNotifier) {
     ws.send(JSON.stringify({ type: "presence.list", users: presenceList(), rooms: roomCounts() }));
   }
