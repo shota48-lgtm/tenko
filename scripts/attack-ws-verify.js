@@ -198,6 +198,22 @@ function startWs(port, extraEnv) {
   c6.ws.close();
   c.child.kill();
 
+  log("");
+  log("=== 6. 認証済みの接続が0本のとき、確認を投げないか（段階7）===");
+  // 届かないポートを API に指定して起動する。**投げていれば必ず失敗のログが出る**。
+  // 誰も繋いでいないので、1本も投げないはず
+  const d = await startWs(8094, { TENKO_WS_VERIFY_INTERVAL_MS: "200", TENKO_API: "http://127.0.0.1:59999" });
+  await wait(2500);   // 200ms 間隔なら10回以上まわる時間
+  const tried = d.lines.filter((l) => l.includes("[verify]")).length;
+  check("接続が0本の間は1回も投げない", tried === 0, "[verify] のログ " + tried + " 行");
+  // 見るだけの接続だけ張っても投げないこと
+  const lurk = await connect("ws://localhost:8094", ["tenko.v1"]);
+  await wait(1500);
+  const tried2 = d.lines.filter((l) => l.includes("[verify]")).length;
+  check("見るだけの接続だけでも投げない", tried2 === 0, "[verify] のログ " + tried2 + " 行");
+  lurk.ws.close();
+  d.child.kill();
+
   for (const t of madeTokens) await db.query(`DELETE FROM sessions WHERE "sessionToken"=$1`, [t]);
   log("\n確認用のセッションを削除した");
   log("結果: OK " + ok + " 件 / 通ってしまった " + ng + " 件");
