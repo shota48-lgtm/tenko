@@ -17,6 +17,10 @@ const { Client } = require("pg");
 const line = fs.readFileSync(".env.local", "utf8").split(/\r?\n/).find((l) => l.startsWith("DATABASE_URL="));
 const url = line.slice("DATABASE_URL=".length).trim().replace(/^["']|["']$/g, "");
 const API = process.env.TENKO_API || "http://localhost:3000";
+// セッションのCookieの名前は、本番（https）では __Secure- が付く（Auth.js の既定）。
+// **手元の名前のまま本番に送ると、認証されずに 401 が返る。**
+// それを「拒否された＝守られている」と読むと、試験が壊れたことに気づけない（段階7-B で実際に起きた）
+const COOKIE_NAME = API.startsWith("https") ? "__Secure-authjs.session-token" : "authjs.session-token";
 const only = process.argv[2] || "";
 
 const db = new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
@@ -42,7 +46,7 @@ async function session(userId) {
     [userId, token],
   );
   made.push(token);
-  return "authjs.session-token=" + token;
+  return COOKIE_NAME + "=" + token;
 }
 
 async function req(path, opts = {}) {

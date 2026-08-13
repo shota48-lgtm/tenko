@@ -18,6 +18,10 @@ const pick = (k) => {
 };
 const url = pick("DATABASE_URL");
 const BASE = process.argv[2] || process.env.TENKO_API || "http://localhost:3000";
+// セッションのCookieの名前は、本番（https）では __Secure- が付く（Auth.js の既定）。
+// **手元の名前のまま本番に送ると、認証されずに 401 が返る。**
+// それを「拒否された＝守られている」と読むと、試験が壊れたことに気づけない（段階7-B で実際に起きた）
+const COOKIE_NAME = BASE.startsWith("https") ? "__Secure-authjs.session-token" : "authjs.session-token";
 const N = 20;
 
 function stats(xs) {
@@ -42,7 +46,7 @@ function stats(xs) {
   await db.query(
     `INSERT INTO sessions ("userId", expires, "sessionToken") VALUES ($1, now() + interval '1 hour', $2)`,
     [uid, token]);
-  const cookie = "authjs.session-token=" + token;
+  const cookie = COOKIE_NAME + "=" + token;
 
   console.log("=== 1. セッション確認の遅延（/api/me を " + N + " 回）");
   const t1 = [];

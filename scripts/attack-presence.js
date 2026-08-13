@@ -23,6 +23,10 @@ const pick = (k) => {
 const url = pick("DATABASE_URL");
 const API = process.env.TENKO_API || "http://localhost:3000";
 const WS = process.env.TENKO_WS || "ws://localhost:8080";
+// セッションのCookieの名前は、本番（https）では __Secure- が付く（Auth.js の既定）。
+// **手元の名前のまま本番に送ると、認証されずに 401 が返る。**
+// それを「拒否された＝守られている」と読むと、試験が壊れたことに気づけない（段階7-B で実際に起きた）
+const COOKIE_NAME = API.startsWith("https") ? "__Secure-authjs.session-token" : "authjs.session-token";
 const log = (s) => console.log(s);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,7 +46,7 @@ async function session(userId) {
     `INSERT INTO sessions ("userId", expires, "sessionToken") VALUES ($1, now() + interval '1 hour', $2)`,
     [userId, t]);
   madeTokens.push(t);
-  return "authjs.session-token=" + t;
+  return COOKIE_NAME + "=" + t;
 }
 
 // 本物の経路で券を取る
@@ -58,11 +62,30 @@ async function ticketFor(cookie) {
 // いったん受け入れてから close(4003) する形にしてあるため（設計書6節）。
 // open だけを見て「繋がった」と判定すると、断られたことを見落とす。
 // 開いたあと少し待ち、閉じられなければ「繋がったまま」と判定する
-const SETTLE_MS = 500;
+// 開いたあと、閉じられるかを待つ時間。
+// **本番（遠いサーバー）では往復に時間がかかる。** 手元の 500ms のままだと、
+// 断りの close が届く前に「繋がったまま」と判定してしまう（段階7-B で実際に起きた）。
+// 遠い相手のときは長めに待つ
+const SETTLE_MS = Number(process.env.TENKO_SETTLE_MS) || (WS.startsWith("wss") ? 3000 : 500);
+
+// 「断られた」と判定する条件。
+//
+// **close code だけを見てはいけない（段階7-B で実測）。**
+//   手元では close(4003) が届く。**本番（Render）では届かない**
+//   （断られた接続が readyState=1 のまま残り、close が発生しない）。
+//   close code だけを見ると、本番では「断られていない」と読めてしまう。
+//   一方、断りの知らせ（auth.rejected）は本番でも届く。
+//
+// したがって「知らせが来た **か** 4003 で閉じられた」を断りとみなす。
+// **どちらも無い場合だけを「通ってしまった」とする。**
+const rejected = (s) => (s.msgs ?? []).includes("auth.rejected") || s.code === 4003;
+const detailOf = (s) =>
+  "opened=" + s.opened + " closed=" + s.closed + " code=" + s.code
+  + " 受け取った知らせ=" + ((s.msgs ?? []).join(",") || "なし");
 function connect(protocols) {
   return new Promise((resolve) => {
     const ws = protocols ? new WebSocket(WS, protocols) : new WebSocket(WS);
-    const state = { ws, list: [], opened: false, code: null, reason: "" };
+    const state = { ws, list: [], opened: false, code: null, reason: "", msgs: [] };
     let settled = false;
     const done = () => { if (!settled) { settled = true; resolve(state); } };
     ws.on("open", () => { state.opened = true; setTimeout(done, SETTLE_MS); });
@@ -71,6 +94,8 @@ function connect(protocols) {
         const m = JSON.parse(d.toString());
         if (m.type === "presence.list") state.list = m.users;
         if (m.type === "auth.rejected" || m.type === "auth.expired") state.authMsg = m;
+        state.msgs = state.msgs || [];
+        state.msgs.push(m.type);
       } catch { /* 無視 */ }
     });
     ws.on("close", (c, r) => { state.code = c; state.reason = r.toString(); state.closed = true; done(); });
@@ -151,14 +176,13 @@ function connect(protocols) {
   log("=== 4. 不正な券で繋げるか ===");
   // 期限切れ: 券の中身を作り直せないため、使い回しと署名の改ざんで確かめる
   const reused = await connect(["tenko.v1", "ticket." + aTicket]);
-  check("同じ券を使い回して繋げない", reused.closed === true && reused.code === 4003,
-    "opened=" + reused.opened + " code=" + reused.code + " reason=" + reused.reason);
+  check("同じ券を使い回して繋げない", rejected(reused),
+    detailOf(reused));
 
   const fresh = await ticketFor(attackerCookie);
   const tampered = fresh.slice(0, -1) + (fresh.slice(-1) === "A" ? "B" : "A");
   const t1 = await connect(["tenko.v1", "ticket." + tampered]);
-  check("署名を書き換えた券で繋げない", t1.closed === true && t1.code === 4003,
-    "code=" + t1.code + " reason=" + t1.reason);
+  check("署名を書き換えた券で繋げない", rejected(t1), detailOf(t1));
 
   // 中身（利用者ID）を書き換える。署名が合わなくなる
   const body = fresh.slice(0, fresh.lastIndexOf("."));
@@ -167,8 +191,7 @@ function connect(protocols) {
   const forgedBody = Buffer.from(decoded.join("."), "utf8").toString("base64url");
   const forged = forgedBody + "." + fresh.slice(fresh.lastIndexOf(".") + 1);
   const t2 = await connect(["tenko.v1", "ticket." + forged]);
-  check("券の利用者IDを書き換えて繋げない", t2.closed === true && t2.code === 4003,
-    "code=" + t2.code + " reason=" + t2.reason);
+  check("券の利用者IDを書き換えて繋げない", rejected(t2), detailOf(t2));
 
   log("");
   log("=== 5. 許可されていない種別は捨てられるか ===");

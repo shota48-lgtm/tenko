@@ -15,6 +15,10 @@ const { Client } = require("pg");
 const line = fs.readFileSync(".env.local", "utf8").split(/\r?\n/).find((l) => l.startsWith("DATABASE_URL="));
 const url = line.slice("DATABASE_URL=".length).trim().replace(/^["']|["']$/g, "");
 const API = process.env.TENKO_API || "http://localhost:3000";
+// セッションのCookieの名前は、本番（https）では __Secure- が付く（Auth.js の既定）。
+// **手元の名前のまま本番に送ると、認証されずに 401 が返る。**
+// それを「拒否された＝守られている」と読むと、試験が壊れたことに気づけない（段階7-B で実際に起きた）
+const COOKIE_NAME = API.startsWith("https") ? "__Secure-authjs.session-token" : "authjs.session-token";
 
 let ok = 0, ng = 0;
 const check = (label, cond, detail) => {
@@ -117,7 +121,7 @@ async function anon(path, opts = {}) {
   await db.query(
     `INSERT INTO sessions ("userId", expires, "sessionToken") VALUES ($1, now() + interval '1 hour', $2)`,
     [demoId, token]);
-  const meRes = await fetch(API + "/api/me", { headers: { Cookie: "authjs.session-token=" + token } });
+  const meRes = await fetch(API + "/api/me", { headers: { Cookie: COOKIE_NAME + "=" + token } });
   check("デモ用のセッションがあっても中に入れない", meRes.status === 401,
         "status=" + meRes.status + " " + (await meRes.text()).slice(0, 40));
   await db.query(`DELETE FROM sessions WHERE "sessionToken"=$1`, [token]);

@@ -26,6 +26,16 @@ const url = pick("DATABASE_URL");
 const SECRET = pick("TENKO_WS_TICKET_SECRET");
 const INTERNAL = pick("TENKO_WS_INTERNAL_TOKEN");
 const API = process.env.TENKO_API || "http://localhost:3000";
+const WS = process.env.TENKO_WS || "ws://localhost:8080";
+// 本番に向けるときは 1 にする。
+// **公開中のサーバーに対して「10回失敗させて全員を切る」試験を行わないため。**
+// 確認用の ws-server を手元で起こす節（2・3・5・6）を飛ばし、
+// 外から見える範囲（期限切れの券・共有秘密なしの ws-verify）だけを試す
+const SKIP_LOCAL = process.env.TENKO_SKIP_LOCAL === "1";
+// セッションのCookieの名前は、本番（https）では __Secure- が付く（Auth.js の既定）。
+// **手元の名前のまま本番に送ると、認証されずに 401 が返る。**
+// それを「拒否された＝守られている」と読むと、試験が壊れたことに気づけない（段階7-B で実際に起きた）
+const COOKIE_NAME = API.startsWith("https") ? "__Secure-authjs.session-token" : "authjs.session-token";
 const log = (s) => console.log(s);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -45,7 +55,7 @@ async function session(userId) {
     `INSERT INTO sessions ("userId", expires, "sessionToken") VALUES ($1, now() + interval '1 hour', $2)`,
     [userId, t]);
   madeTokens.push(t);
-  return { cookie: "authjs.session-token=" + t, token: t };
+  return { cookie: COOKIE_NAME + "=" + t, token: t };
 }
 
 async function ticketFor(cookie) {
@@ -63,7 +73,8 @@ function expiredTicket(userId, sessionId) {
   return body + "." + mac;
 }
 
-const SETTLE_MS = 600;
+// 本番（遠いサーバー）では往復に時間がかかるため長めに待つ（段階7-B）
+const SETTLE_MS = Number(process.env.TENKO_SETTLE_MS) || (WS.startsWith("wss") ? 3000 : 600);
 function connect(wsUrl, protocols) {
   return new Promise((resolve) => {
     const ws = new WebSocket(wsUrl, protocols);
@@ -119,11 +130,17 @@ function startWs(port, extraEnv) {
   const s1 = await session(userId);
   const sid = (await db.query(`SELECT id FROM sessions WHERE "sessionToken"=$1`, [s1.token])).rows[0].id;
   const dead = expiredTicket(userId, String(sid));
-  const c1 = await connect("ws://localhost:8080", ["tenko.v1", "ticket." + dead]);
-  check("期限切れの券で繋げない", c1.closed && c1.code === 4003,
-    "code=" + c1.code + " reason=" + c1.reason);
+  const c1 = await connect(WS, ["tenko.v1", "ticket." + dead]);
+  // **close code だけを見てはいけない（段階7-B で実測）。**
+  // 手元では close(4003) が届くが、本番（Render）では届かない。
+  // 断りの知らせ（auth.rejected）は本番でも届くので、どちらかがあれば断られたとみなす
+  check("期限切れの券で繋げない",
+    (c1.msgs ?? []).includes("auth.rejected") || c1.code === 4003,
+    "closed=" + c1.closed + " code=" + c1.code + " 受け取った知らせ=" + ((c1.msgs ?? []).join(",") || "なし"));
 
   log("");
+  if (SKIP_LOCAL) log("（本番向けのため、節2・3・5・6は飛ばす。手元で ws-server を起こす試験のため）");
+  if (!SKIP_LOCAL) {
   log("=== 2. 接続中にセッションを無効にすると切られるか ===");
   // 確認の間隔を短くした ws-server を、別のポートで起動する
   const a = await startWs(8091, { TENKO_WS_VERIFY_INTERVAL_MS: "800" });
@@ -168,6 +185,7 @@ function startWs(port, extraEnv) {
   b.child.kill();
 
   log("");
+  }
   log("=== 4. /api/ws-verify は共有秘密なしで答えるか ===");
   const r1 = await fetch(API + "/api/ws-verify", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionIds: [1] }) });
@@ -185,6 +203,7 @@ function startWs(port, extraEnv) {
     "status=" + r3.status + " " + JSON.stringify(j3));
 
   log("");
+  if (!SKIP_LOCAL) {
   log("=== 5. TENKO_PUBLIC_VIEW=0 のとき、券の無い接続は拒まれるか ===");
   const c = await startWs(8093, { TENKO_PUBLIC_VIEW: "0" });
   const c5 = await connect("ws://localhost:8093", ["tenko.v1"]);
@@ -213,6 +232,7 @@ function startWs(port, extraEnv) {
   check("見るだけの接続だけでも投げない", tried2 === 0, "[verify] のログ " + tried2 + " 行");
   lurk.ws.close();
   d.child.kill();
+  }
 
   for (const t of madeTokens) await db.query(`DELETE FROM sessions WHERE "sessionToken"=$1`, [t]);
   log("\n確認用のセッションを削除した");

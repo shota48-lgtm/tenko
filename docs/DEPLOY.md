@@ -2,6 +2,19 @@
 
 **この手順はPOが実行する。** アカウントの作成・鍵の入力・支払い情報に関わる操作は、CCが代行しない。
 
+> **2026-08-13、この手順で実際に公開した。そのとき5箇所で止まった。**
+> 止まった箇所はすべてこの文書に書き足してある（🔴 の印を付けた）。
+> **次にこの手順をなぞる人が同じ場所で止まらないことが、この文書の目的である。**
+>
+> 公開したもの:
+>
+> | | URL |
+> |---|---|
+> | アプリ | `https://tenko-eight.vercel.app` |
+> | ws-server | `wss://tenko-ws.onrender.com` |
+> | リポジトリ | `https://github.com/shota48-lgtm/tenko`（公開） |
+> | ブランチ | `feature/phase5-auth`（Vercel の Production Branch もこれ） |
+
 構成:
 
 ```
@@ -23,7 +36,22 @@
 | 2 | Render のアカウント | POが作る（カード不要） |
 | 3 | Vercel のアカウント | POが作る |
 | 4 | Neon の接続文字列 | ある（`.env.local`） |
-| 5 | Google OAuth クライアント | ある。**本番のリダイレクトURIを後で足す** |
+| 5 | Google OAuth クライアント | ある。**本番のリダイレクトURIを後で足す（3-1節）** |
+| 6 | `WS_NOTIFY_TOKEN` | 🔴 **`.env.local` に無い。ここで新しく作る**（下記） |
+
+### 🔴 `WS_NOTIFY_TOKEN` は「新しく作る値」である
+
+他の鍵は `.env.local` から写すが、**これだけは元が無い。**
+`ws-server/index.js` が `|| "dev-notify-token"` に落ちるため、
+**手元では未設定でも動いてしまい、本番で未設定だと既定値のまま動く**（投稿の通知の合言葉が既定値になる）。
+
+作り方（値は画面に出る。共有中は避ける）:
+
+```powershell
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+出た値を、**Render と Vercel の両方に同じものを入れる**。
 
 ---
 
@@ -88,19 +116,50 @@ cd "$env:USERPROFILE\OneDrive\デスクトップ\claude\tenko"; git remote add o
    | `TENKO_WS_INTERNAL_TOKEN` | 同上（**Render と同じ値**） |
    | `WS_NOTIFY_TOKEN` | Render に入れたものと同じ |
    | `TENKO_PUBLIC_VIEW` | `1` |
-   | `NEXT_PUBLIC_WS_URL` | `wss://tenko-ws.onrender.com` ← **ws:// ではなく wss://** |
-   | `AUTH_URL` | デプロイ後のURL（例 `https://tenko.vercel.app`） |
+   | **`NEXT_PUBLIC_WS_URL`** | 🔴 **`wss://tenko-ws.onrender.com`** ← **ws:// ではなく wss://** |
+   | `AUTH_URL` | デプロイ後のURL（例 `https://tenko-eight.vercel.app`） |
 4. **Deploy**
 
-### 3-1. Google のリダイレクトURIを足す
+### 🔴 `NEXT_PUBLIC_WS_URL` を入れ忘れると「接続しています…」で止まる
 
-Google Cloud → 認証情報 → OAuth クライアント → **承認済みのリダイレクトURI** に追加:
+**これが無いと、画面は ws-server に繋ぎに行かない**（既定の `ws://localhost:8080` を見に行き、
+本番のブラウザからは届かない）。村とデモの20人は見えるが、在席が動かず、
+ヘッダが「接続しています…」のままになる。
+
+**`NEXT_PUBLIC_` で始まる環境変数はビルドのときに埋め込まれる。**
+後から追加した場合、**必ず再ビルド（Redeploy）が要る。** 環境変数を保存しただけでは反映されない。
+
+### 🔴 Production Branch は Settings → Git ではない
+
+作業ブランチ（`feature/phase5-auth`）を本番に出すには:
+
+**Settings → Environments → Production → Branch Tracking** でブランチを指定する。
+
+### 🔴 「Redeploy」ではブランチは切り替わらない
+
+Redeploy は**同じコミットを焼き直すだけ**である。
+別のブランチの内容を本番にするには、**そのブランチに push する**（push が本番デプロイを発火させる）。
+
+### 🔴 3-1. Google のリダイレクトURIを足す（**忘れるとログインだけが失敗する**）
+
+1. https://console.cloud.google.com/ → プロジェクト `tenko` を選ぶ
+2. 左メニュー **APIとサービス → 認証情報**
+3. **OAuth 2.0 クライアント ID** の一覧から、使っているクライアントの名前を押す
+4. **承認済みのリダイレクト URI** の欄で「**URI を追加**」を押し、次を入れる:
 
 ```
 https://<Vercelのドメイン>/api/auth/callback/google
 ```
 
-**ローカル用（`http://localhost:3000/...`）は消さない。** 両方あってよい。
+5. **保存**
+
+**ローカル用（`http://localhost:3000/api/auth/callback/google`）は消さない。** 両方あってよい。
+
+忘れた場合の症状: **村は見えるが、ログインのときだけ Google が
+`エラー 400: redirect_uri_mismatch` を返す。** アプリ側のログには何も出ない。
+
+**保存してから反映まで数分かかることがある**（Google の案内では最大で数時間）。
+直後に試して失敗しても、5分ほど置いてもう一度試すこと。
 
 ### 3-2. Render に Vercel のURLを入れる
 
@@ -133,6 +192,17 @@ cd "$env:USERPROFILE\OneDrive\デスクトップ\claude\tenko"; node scripts\mea
 ```powershell
 cd "$env:USERPROFILE\OneDrive\デスクトップ\claude\tenko"; $env:TENKO_API="https://<Vercelのドメイン>"; $env:TENKO_WS="wss://tenko-ws.onrender.com"; node scripts\attack-public-view.js; node scripts\attack-phase5-auth.js; node scripts\attack-presence.js
 ```
+
+### 🔴 本番に試験を向けるときの落とし穴（2026-08-13 に実際に踏んだ）
+
+| こと | 症状 | 対処 |
+|---|---|---|
+| **セッションCookieの名前が変わる** | 本番（https）では `__Secure-authjs.session-token`。手元の名前で送ると**すべて 401** になり、「拒否された＝守られている」と読めてしまう | 試験スクリプトは URL が https なら `__Secure-` を付ける（対応済み） |
+| **close code が届かない** | Render 越しだと `close(4003)` が画面に届かない。断られた接続が開いたまま残る | 断りは**知らせ（`auth.rejected`）で判定する**。close code だけを見ない（対応済み） |
+| **往復が遅い** | 手元の待ち時間（500ms）では、断りが届く前に判定してしまう | 遠い相手のときは3秒待つ（対応済み） |
+
+**いずれも「守れていない」ではなく「試験が壊れる」形の問題である。**
+壊れた試験は、**壊れたことを「合格」として報告する。**
 
 確認する項目:
 

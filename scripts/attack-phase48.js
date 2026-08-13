@@ -10,7 +10,11 @@ const crypto = require("crypto");
 const { Client } = require("pg");
 const WebSocket = require("ws");
 const geo = require("../ws-server/geometry");
-const API = "http://localhost:3000";
+const API = process.env.TENKO_API || "http://localhost:3000";
+// セッションのCookieの名前は、本番（https）では __Secure- が付く（Auth.js の既定）。
+// **手元の名前のまま本番に送ると、認証されずに 401 が返る。**
+// それを「拒否された＝守られている」と読むと、試験が壊れたことに気づけない（段階7-B で実際に起きた）
+const COOKIE_NAME = API.startsWith("https") ? "__Secure-authjs.session-token" : "authjs.session-token";
 const log = (s) => console.log(s);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -30,7 +34,7 @@ async function ticketForUser(userId) {
     [userId, token]);
   madeTokens.push(token);
   const r = await fetch(API + "/api/ws-ticket", {
-    method: "POST", headers: { Cookie: "authjs.session-token=" + token },
+    method: "POST", headers: { Cookie: COOKIE_NAME + "=" + token },
   });
   if (!r.ok) throw new Error("券が取れない: " + r.status);
   return (await r.json()).ticket;
@@ -40,7 +44,7 @@ async function ticketForUser(userId) {
 function open(name, ticket) {
   return new Promise((resolve) => {
     const protocols = ticket ? ["tenko.v1", "ticket." + ticket] : ["tenko.v1"];
-    const ws = new WebSocket("ws://localhost:8080", protocols);
+    const ws = new WebSocket(process.env.TENKO_WS || "ws://localhost:8080", protocols);
     ws.got = [];
     ws.on("message", (d) => { try { ws.got.push(JSON.parse(d.toString())); } catch {} });
     ws.on("open", () => resolve(ws));
