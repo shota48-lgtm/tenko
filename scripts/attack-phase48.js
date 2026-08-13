@@ -5,16 +5,46 @@
    - 他人になりすまして呼びかけを送れないこと
    - 呼びかけの連打を防げること
    実行: node scripts\attack-phase48.js */
+const fs = require("fs");
+const crypto = require("crypto");
+const { Client } = require("pg");
 const WebSocket = require("ws");
 const geo = require("../ws-server/geometry");
-const API = "http://localhost:3000";
+const API = process.env.TENKO_API || "http://localhost:3000";
+// セッションのCookieの名前は、本番（https）では __Secure- が付く（Auth.js の既定）。
+// **手元の名前のまま本番に送ると、認証されずに 401 が返る。**
+// それを「拒否された＝守られている」と読むと、試験が壊れたことに気づけない（段階7-B で実際に起きた）
+const COOKIE_NAME = API.startsWith("https") ? "__Secure-authjs.session-token" : "authjs.session-token";
 const log = (s) => console.log(s);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 接続を開き、届いたメッセージを溜める
-function open(name) {
+// Phase 5 段階6 以降、村に出るには入場券が要る。
+// **利用者IDは券から決まるため、架空のIDでは村に出られない。**
+// 確認用に、実在の利用者のセッションを作って券を取る（終わったら消す）
+const envLines = fs.readFileSync(".env.local", "utf8").split(/\r?\n/);
+const dbUrl = (envLines.find((l) => l.startsWith("DATABASE_URL=")) || "")
+  .slice("DATABASE_URL=".length).trim().replace(/^["']|["']$/g, "");
+const db = new Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+const madeTokens = [];
+
+async function ticketForUser(userId) {
+  const token = crypto.randomUUID();
+  await db.query(
+    `INSERT INTO sessions ("userId", expires, "sessionToken") VALUES ($1, now() + interval '1 hour', $2)`,
+    [userId, token]);
+  madeTokens.push(token);
+  const r = await fetch(API + "/api/ws-ticket", {
+    method: "POST", headers: { Cookie: COOKIE_NAME + "=" + token },
+  });
+  if (!r.ok) throw new Error("券が取れない: " + r.status);
+  return (await r.json()).ticket;
+}
+
+// 接続を開き、届いたメッセージを溜める。券を渡すとその人として村に入る
+function open(name, ticket) {
   return new Promise((resolve) => {
-    const ws = new WebSocket("ws://localhost:8080");
+    const protocols = ticket ? ["tenko.v1", "ticket." + ticket] : ["tenko.v1"];
+    const ws = new WebSocket(process.env.TENKO_WS || "ws://localhost:8080", protocols);
     ws.got = [];
     ws.on("message", (d) => { try { ws.got.push(JSON.parse(d.toString())); } catch {} });
     ws.on("open", () => resolve(ws));
@@ -34,13 +64,20 @@ function stateOf(ws, id) {
   // 足元が枠に入る位置
   const inside = (b, i) => ({ x: b.x + ((i % 3) - 1) * 5, y: b.y - 12 });
 
+  await db.connect();
+  // 被害者と攻撃者。**実在の利用者でなければ村に出られない**（券から利用者IDが決まるため）。
+  // 詰める側にはデモ用でない実在の利用者を使う（デモ用はログインできない＝券が出ない）
+  const pool = (await db.query(
+    `SELECT id, display_name FROM users
+      WHERE deleted_at IS NULL AND is_demo = false ORDER BY id`)).rows.map((r) => Number(r.id));
+  const VICTIM = pool[1];
+  const ATTACKER = pool[3];
+  log("被害者=" + VICTIM + " 攻撃者=" + ATTACKER + "（実在の利用者。券から決まる）");
+
   const watcher = await open("見張り");
-  // 被害者と攻撃者を用意する。IDは実在しない番号でよい（在席は名乗り制のため）
-  const VICTIM = 9001;
-  const ATTACKER = 9002;
-  const victim = await open("被害者");
+  const victim = await open("被害者", await ticketForUser(VICTIM));
   victim.send(JSON.stringify({ type: "presence.set", user: { id: VICTIM, name: "被害者", colorIndex: 1 }, state: "idle", talk: "ok" }));
-  const attacker = await open("攻撃者");
+  const attacker = await open("攻撃者", await ticketForUser(ATTACKER));
   attacker.send(JSON.stringify({ type: "presence.set", user: { id: ATTACKER, name: "攻撃者", colorIndex: 2 }, state: "idle", talk: "ok" }));
   await wait(500);
   watcher.send(JSON.stringify({ type: "presence.sync" }));
@@ -99,9 +136,11 @@ function stateOf(ws, id) {
   const cap = roomsRes.rooms.find((r) => Number(r.id) === Number(house.room.id)).capacity;
   log("  対象: 「" + house.room.name + "」 定員=" + cap);
   const fillers = [];
+  // 定員は「別々の利用者」で数える。券ごとに別の実在の利用者を使う
+  const fillerIds = pool.filter((id) => id !== VICTIM && id !== ATTACKER).slice(0, cap);
   for (let i = 0; i < cap; i++) {
-    const ws = await open("詰める" + i);
-    ws.send(JSON.stringify({ type: "presence.set", user: { id: 9100 + i, name: "詰める" + i, colorIndex: 1 }, state: "idle", talk: "ok" }));
+    const ws = await open("詰める" + i, await ticketForUser(fillerIds[i]));
+    ws.send(JSON.stringify({ type: "presence.set", user: { id: fillerIds[i], name: "詰める" + i, colorIndex: 1 }, state: "idle", talk: "ok" }));
     await wait(80);
     const t = inside(house, i);
     ws.send(JSON.stringify({ type: "presence.move", x: t.x, y: t.y }));
@@ -184,4 +223,12 @@ function stateOf(ws, id) {
   log("  定員は変わっていないか: " + cap + " -> " + capNow);
 
   for (const ws of [watcher, victim, attacker, ...fillers]) ws.close();
-})().catch((e) => { console.error("ERR: " + e.message); process.exit(1); });
+  // 確認用に作ったセッションを消す
+  for (const t of madeTokens) await db.query(`DELETE FROM sessions WHERE "sessionToken"=$1`, [t]);
+  log("\n確認用のセッションを削除した（" + madeTokens.length + " 件）");
+  await db.end();
+})().catch(async (e) => {
+  console.error("ERR: " + e.message);
+  try { for (const t of madeTokens) await db.query(`DELETE FROM sessions WHERE "sessionToken"=$1`, [t]); await db.end(); } catch { }
+  process.exit(1);
+});

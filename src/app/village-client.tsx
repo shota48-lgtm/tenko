@@ -70,13 +70,15 @@ type User = { id: number; displayName: string };
 // 呼びかけ。名前は持たない。表示のたびにDBの表示名で引く（自己申告の名前を画面に出さない）
 type Incoming = { id: number; knewFocus?: boolean };
 
-// 認証は未実装。利用者は暫定的に固定値で扱う
-function devUser() {
-  if (typeof window === "undefined") return { id: 1, name: "利用者1", colorIndex: 1 };
-  const q = new URLSearchParams(window.location.search);
-  const id = Number(q.get("me") ?? 1);
-  return { id, name: q.get("name") ?? "利用者" + id, colorIndex: ((id - 1) % 4) + 1 };
-}
+// 誰として村にいるかは、サーバー側（page.tsx）が決めてここへ渡す。
+// **画面側で利用者を決める仕組みは持たない**（Phase 5 段階3で devUser() を削除した。
+// 以前は URL の ?me= を読んでおり、誰にでもなりすませた）。
+export type Me = { id: number; name: string; role: string; colorIndex: number };
+
+// 未ログインのときに使う置き。id=0 は誰とも一致しないため、
+// 「自分」として描かれる人がいない状態になる
+const GUEST: Me = { id: 0, name: "", role: "", colorIndex: 1 };
+
 function isDebug() {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).get("debug") === "1";
@@ -90,14 +92,27 @@ const menuBtnOn = "tk-btn tk-btn-on w-full justify-start text-xs";
 // 画面側で /api/rooms を取りに行っていたところ、到着まで1.4秒かかり（実測）、
 // その間は建物のない村が描かれていた。POが開いた直後の画面がこの状態だった。
 // 建物の配置は村の骨組みであり、後から届く情報にしてはいけない。
-export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) {
+export default function VillagePage({
+  initialRooms, initialPeople, initialCounts, me: sessionMe,
+}: {
+  initialRooms: Room[];
+  // デモ用の在席。ws-server が寝ていても村に人がいるように、最初のHTMLに載せて渡す（段階7）
+  initialPeople: Presence[];
+  initialCounts: RoomCounts;
+  me: Me | null;
+}) {
   const router = useRouter();
+  // ログインしていない人は「見るだけ」。村は見えるが、自分のアバターは出ない
+  const isGuest = sessionMe === null;
+  const me = sessionMe ?? GUEST;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [variant, setVariant] = useState<"a" | "b" | "c">(ACTIVE_VARIANT);
   const [rooms] = useState<Room[]>(initialRooms);
   const [users, setUsers] = useState<User[]>([]);
-  const [people, setPeople] = useState<Presence[]>([]);
-  const [counts, setCounts] = useState<RoomCounts>({});
+  // 初期値はサーバーから渡ったデモ用の在席。WS が繋がれば丸ごと置き換わる。
+  // 置き換えても同じ座標・同じ状態が入るため、村はちらつかない（実機で確認）
+  const [people, setPeople] = useState<Presence[]>(initialPeople);
+  const [counts, setCounts] = useState<RoomCounts>(initialCounts);
   const [notes, setNotes] = useState<NoteMap>({});
   const [conn, setConn] = useState<"接続中" | "切断" | "再接続中">("再接続中");
   const [myState, setMyState] = useState<Presence["state"]>("idle");
@@ -107,8 +122,13 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   const [noteError, setNoteError] = useState<string | null>(null);
   const [noteSaved, setNoteSaved] = useState(false);
   const [autoAway, setAutoAway] = useState(false);
-  const [me, setMe] = useState({ id: 1, name: "利用者1", colorIndex: 1 });
   const [debug, setDebug] = useState(false);
+  // セッションが切れた（開いたまま7日が過ぎた・DBの行が消された）。黙って古い画面を映し続けない
+  const [sessionLost, setSessionLost] = useState(false);
+  // 一度でも WS が繋がったか。最初の接続と、繋がったあとの切断を区別するために持つ
+  const [everConnected, setEverConnected] = useState(false);
+  // 在席の同期が止まった（auth.expired を受けた）。村が空に見えることと区別する
+  const [syncStopped, setSyncStopped] = useState(false);
   // アバターを押して出すもの。自分なら操作、他人なら情報だけ
   const [picked, setPicked] = useState<{ id: number; x: number; y: number } | null>(null);
   // 一覧は既定で畳む。村が主役で、一覧は必要なときに開くもの
@@ -157,7 +177,9 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   //   "hover": 乗せた人だけ出す
   // 既定は「全員」。22人で重なり0・名前を覆う数0 を実測して決めた（PHASE49_LOG.md）
   const [bubbleMode, setBubbleMode] = useState<"few" | "all" | "hover">("all");
-  const [myRole, setMyRole] = useState<string | null>(null);
+  // 役割はサーバーから渡ってくる。/api/me を叩き直さない。
+  // これは画面の分岐（承認への導線を出すか）にしか使わない。権限の判定はAPI側
+  const myRole = sessionMe?.role ?? null;
 
   const wsRef = useRef<WebSocket | null>(null);
   const userRef = useRef(me);
@@ -185,30 +207,46 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   }, []);
 
   const announce = useCallback((state: Presence["state"], talkStatus: TalkStatus) => {
+    // 見るだけの人は村に現れない。在席を申告しない（Phase 5 段階3）。
+    // ws-server 側の検証は段階6で入れる。ここで送らないのは体験のためであって、担保ではない
+    if (isGuest) return false;
     return send({ type: "presence.set", user: userRef.current, state, roomId: null, talk: talkStatus });
-  }, [send]);
+  }, [send, isGuest]);
+
+  // セッションが切れたとき。
+  //
+  // 段階3で、チャットが 401 を「送り直しても通らない4xx」に含めていて
+  // 書いた文が黙って消えていた。同じ形の失敗を村でも作らない。
+  // 401 を黙って捨てると、開いたままの画面が古い情報を映し続け、
+  // 操作だけが通らない状態になる（何が起きたか利用者に分からない）
+  const noteSessionLost = useCallback((status: number) => {
+    if (status === 401) setSessionLost(true);
+    return status === 401;
+  }, []);
 
   // 未読と勤怠の下書き。村に出すために定期的に取り直す
-  const loadVillage = useCallback(async (uid: number) => {
+  const loadVillage = useCallback(async () => {
     try {
-      const res = await fetch("/api/village?user=" + uid);
+      const res = await fetch("/api/village");
+      if (noteSessionLost(res.status)) return;
       if (!res.ok) return;
       const d = await res.json();
       setUnread(d.unread ?? {});
       setDrafts(d.drafts ?? []);
     } catch { /* 取れなくても村は描く */ }
-  }, []);
+  }, [noteSessionLost]);
 
-  const loadAnns = useCallback(async (uid: number) => {
+  const loadAnns = useCallback(async () => {
     try {
-      const res = await fetch("/api/announcements?user=" + uid);
+      const res = await fetch("/api/announcements");
+      if (noteSessionLost(res.status)) return;
       if (!res.ok) return;
       const d = await res.json();
       setAnns(d.announcements ?? []);
       setAnnUnread(Number(d.unread ?? 0));
       setAnnCanWrite(d.canWrite === true);
     } catch { /* 取れなくても村は描く */ }
-  }, []);
+  }, [noteSessionLost]);
 
   const loadNotes = useCallback(async () => {
     try {
@@ -230,36 +268,64 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
         router.replace("/rooms/" + legacyRoom);
         return;
       }
-      const u = devUser();
-      setMe(u);
-      userRef.current = u;
       setDebug(isDebug());
+      // 名前と吹き出しは村の絵の一部なので、ログインしていなくても読む
       void fetch("/api/users").then((r) => r.json()).then((d) => setUsers(d.users ?? [])).catch(() => {});
       void loadNotes();
-      void fetch("/api/notes?user=" + u.id).then((r) => r.json())
+      // ここから下は自分の情報。ログインしている人だけが叩く。
+      // 叩いても 401 が返るだけだが、無駄な要求を出さない
+      if (isGuest) return;
+      void fetch("/api/notes?mine=1").then((r) => r.json())
         .then((d) => setNoteInput(d.note?.body ?? "")).catch(() => {});
-      void fetch("/api/me?user=" + u.id).then((r) => r.json())
-        .then((d) => setMyRole(d.me?.role ?? null)).catch(() => {});
-      void loadVillage(u.id);
-      void loadAnns(u.id);
+      void loadVillage();
+      void loadAnns();
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes, loadVillage, loadAnns, router]);
+  }, [loadNotes, loadVillage, loadAnns, router, isGuest]);
 
-  // WebSocket。在席・位置・呼びかけを配る
+  // WebSocket。在席・位置・呼びかけを配る。
+  //
+  // Phase 5 段階6: 村に自分を出すには**入場券**が要る。
+  //   券は同一オリジンの POST /api/ws-ticket で取り、
+  //   new WebSocket(url, ["tenko.v1", "ticket." + 券]) の形で渡す。
+  //   ブラウザは独自のヘッダを送れず、別ドメインの ws-server には Cookie も届かないため。
+  //
+  //   **未ログインの人は券を取りに行かない**（401 を無駄に踏まない）。券なしで繋ぎ、
+  //   村を見るだけになる。券が取れなかった場合も同じ（村が見えなくなるより良い）。
   useEffect(() => {
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let delay = 1000;
+    // 券は使い捨て。繋ぎ直すたびに取り直す
+    const getTicket = async (): Promise<string | null> => {
+      if (isGuest) return null;
+      try {
+        const res = await fetch("/api/ws-ticket", { method: "POST" });
+        if (!res.ok) {
+          if (res.status === 401) setSessionLost(true);
+          return null;
+        }
+        const d = await res.json();
+        return typeof d.ticket === "string" ? d.ticket : null;
+      } catch { return null; }
+    };
 
-    const connect = () => {
+    const connect = async () => {
       setConn("再接続中");
-      const ws = new WebSocket(WS_URL);
+      const ticket = await getTicket();
+      if (closed) return;
+      // 券が無くても "tenko.v1" は必ず送る。
+      // protocols を1つも送らないと、サーバの handleProtocols が呼ばれない（実測）
+      const protocols = ticket ? ["tenko.v1", "ticket." + ticket] : ["tenko.v1"];
+      const ws = new WebSocket(WS_URL, protocols);
       wsRef.current = ws;
       ws.onopen = () => {
         delay = 1000;
         setConn("接続中");
         setStale(false);
+        setEverConnected(true);
+        // 繋がり直したら、同期が止まっている表示は消す
+        if (ticket) setSyncStopped(false);
         announce(myStateRef.current, talkRef.current);
         ws.send(JSON.stringify({ type: "presence.sync" }));
       };
@@ -269,9 +335,33 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
           if (d.type === "presence.list") {
             // 同じ利用者が複数の端末から接続していても、村では1人として扱う
             const byId = new Map<number, Presence>();
+            // **サーバーが最初のHTMLに載せたデモ用の人を、下敷きとして置く（段階7）。**
+            //
+            // WS の一覧で丸ごと置き換える形にしていたところ、
+            // ws-server がアプリに到達できない状態（デモ用の一覧を取れない）で繋がると、
+            // **空の一覧が届いて村が空になった**（実機で確認）。
+            // 村が空に見えることは、勤怠のアプリでは「誰も働いていない」という誤った主張になる。
+            //
+            // デモ用の人はDBの行そのもので、生きている人のように増減しない。
+            // WS が同じIDを送ってきたら、そちらで上書きされる（下の for が後に回る）
+            for (const p of initialPeople) byId.set(Number(p.id), p);
             for (const p of (d.users ?? []) as Presence[]) byId.set(Number(p.id), { ...p, id: Number(p.id) });
-            setPeople(Array.from(byId.values()));
-            if (d.rooms) setCounts(d.rooms as RoomCounts);
+            const merged = Array.from(byId.values());
+            setPeople(merged);
+            if (d.rooms) {
+              // 建物の人数は、実際に描く人から数え直す。
+              // サーバーの数字をそのまま使うと、上の下敷きで足した人のぶんだけ
+              // 「帯は空なのに中に人がいる」状態になる
+              const counts = d.rooms as RoomCounts;
+              const fixed: RoomCounts = {};
+              for (const [id, c] of Object.entries(counts)) {
+                fixed[Number(id)] = {
+                  ...c,
+                  used: merged.filter((p) => Number(p.roomId) === Number(id)).length,
+                };
+              }
+              setCounts(fixed);
+            }
           } else if (d.type === "presence.denied") {
             // 満員・不正な座標など。押した本人にだけ返る
             setDenied(String(d.reason ?? "移動できませんでした"));
@@ -288,24 +378,52 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
                 : "「いまは難しい」と返事がありました";
             // ここも名前はDBの表示名で引く（届いた値をそのまま出さない）
             setAnswered({ id: Number(d.from?.id), text: a });
+          } else if (d.type === "auth.expired" || d.type === "auth.rejected") {
+            // セッションが無効になった／券が通らなかった。
+            //
+            // **close code に頼らない（段階7-B。本番で実測した）。**
+            //   手元では close(4001) / close(4003) がそのまま画面に届く（spike/ws-auth-01）。
+            //   **本番（Render 越し）では、こうなる:**
+            //     この知らせ  : 254 ms で届く
+            //     close      : **20,254 ms 後**に届き、しかも **code は 1006 に置き換わる**
+            //   プロキシが close を20秒ほど遅らせ、コードを捨てている。
+            //   close code を待つ形だと、券を取り直すまでに20秒かかり、
+            //   しかも 4001 と 4003 の区別が失われる。
+            //   したがって、**繋ぎ直しの引き金はこの知らせにする。** close code は届けば使う程度に留める。
+            //
+            // 画面にも出す。黙って切ると村が静かに空になり、
+            // 勤怠のアプリで「誰も働いていない」という誤った主張になる
+            console.warn("[ws] " + d.type + ": " + d.reason);
+            if (!isGuest) setSyncStopped(true);
+            // 自分から閉じる。onclose が動き、いつもの繋ぎ直しの経路に乗る
+            try { ws.close(); } catch { /* 既に閉じている */ }
           }
         } catch { /* 解釈できない通知は捨てる */ }
       };
-      ws.onclose = () => {
+      ws.onclose = (e) => {
         if (closed) return;
         setConn("切断");
         setStale(true);
-        timer = setTimeout(() => { delay = Math.min(delay * 2, 5000); connect(); }, delay);
+        // 4001（セッションが無効）と 4003（券が通らない）は、券を取り直せば入れることがある。
+        // **すぐに繋ぎ直すのは1回だけ**。以後は間隔を倍にする（上限30秒）。
+        // 空けないと、セッションが本当に無効なときに券の要求が際限なく増える。
+        //
+        // 本番では close code が届かないことがあるため（段階7-B）、
+        // 知らせ（auth.expired / auth.rejected）を受けて自分で閉じた場合もここに来る。
+        // その場合 e.code は 1005（コード無し）になるので、それも「取り直す」に含める
+        const retryNow = (e.code === 4001 || e.code === 4003 || e.code === 1005) && delay === 1000;
+        const wait = retryNow ? 500 : delay;
+        timer = setTimeout(() => { delay = Math.min(delay * 2, 30_000); void connect(); }, wait);
       };
       ws.onerror = () => { /* close が続けて呼ばれる */ };
     };
-    connect();
+    void connect();
     return () => {
       closed = true;
       if (timer) clearTimeout(timer);
       wsRef.current?.close();
     };
-  }, [announce]);
+  }, [announce, isGuest, initialPeople]);
 
   // 断られた理由・呼びかけの結果は数秒で消す。画面に残し続けると邪魔になる
   useEffect(() => {
@@ -355,9 +473,9 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   }, [announce]);
 
   useEffect(() => {
-    const t = setInterval(() => { void loadNotes(); void loadVillage(userRef.current.id); }, 30_000);
+    const t = setInterval(() => { void loadNotes(); if (!isGuest) void loadVillage(); }, 30_000);
     return () => clearInterval(t);
-  }, [loadNotes, loadVillage]);
+  }, [loadNotes, loadVillage, isGuest]);
 
   // 画面に村全体が入る拡大率を測る。窓の大きさが変わるたびに測り直す
   useEffect(() => {
@@ -564,7 +682,7 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
     const res = await fetch("/api/notes", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body: noteInput, user: me.id }),
+      body: JSON.stringify({ body: noteInput }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -580,7 +698,7 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   const clearNote = async () => {
     await fetch("/api/notes", {
       method: "DELETE", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: me.id }),
+      body: "{}",
     });
     setNoteInput("");
     setNoteSaved(false);
@@ -607,9 +725,14 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
       .sort((a, b) => (order[a.state] - order[b.state]) || a.id - b.id);
   }, [users, people, notes]);
 
+  // 表示名はDBから引く（自己申告の名前を画面に出さない）。
+  //
+  // 未ログインの人には、実在の利用者の名前が配られない（/api/users がデモ用の分しか返さない）。
+  // そのとき「利用者3」のように利用者IDを出すと、名前の代わりにIDを配ることになる。
+  // 名前が引けない相手は「メンバー」とだけ出す（Phase 5 段階4）
   const nameOf = useCallback(
-    (id: number) => users.find((u) => u.id === id)?.displayName ?? "利用者" + id,
-    [users],
+    (id: number) => users.find((u) => u.id === id)?.displayName ?? (isGuest ? "メンバー" : "利用者" + id),
+    [users, isGuest],
   );
 
   // 村に置く名前と話しかけ可否のラベル。人物の座標に合わせて重ねる
@@ -634,21 +757,44 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
   // 村にいる人数。「メンバー」を押す動機を出すために添える
   const inVillage = roster.filter((r) => r.state !== "off").length;
 
-  // 噴水を押したとき。開いた時点で既読にする
+  // 噴水を押したとき。開いた時点で既読にする。
+  // 未ログインでも押せる（押せることは分かる）が、中身は見せない。
+  // お知らせは社内の連絡であり、村を見ただけの人に配るものではない（POの判断）
   const openAnns = async () => {
     setShowAnns(true);
+    if (isGuest) return;
     await fetch("/api/announcements", {
       method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: me.id }),
+      body: "{}",
     }).catch(() => {});
-    await loadAnns(me.id);
+    await loadAnns();
+  };
+
+  // ログアウト。Auth.js の signOut は Server Action か クライアント関数だが、
+  // ここは村の画面（Client Component）なので、素直に POST を投げる。
+  // CSRF トークンは Auth.js が Cookie と一緒に持っている（同一オリジンなので送られる）
+  const doSignOut = async () => {
+    try {
+      const c = await fetch("/api/auth/csrf").then((r) => r.json());
+      await fetch("/api/auth/signout", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ csrfToken: c.csrfToken, callbackUrl: "/" }).toString(),
+      });
+    } catch { /* 失敗しても、下の再読み込みで状態は正される */ }
+    // 村に「自分」が残らないよう、在席を消してから読み直す。
+    // router.refresh() で page.tsx（Server Component）が動き直し、
+    // セッションが無い状態＝見るだけの村として描かれる
+    send({ type: "presence.set", user: userRef.current, state: "off" });
+    setPicked(null);
+    router.refresh();
   };
 
   const postAnn = async () => {
     setAnnError(null);
     const res = await fetch("/api/announcements", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body: annInput, user: me.id }),
+      body: JSON.stringify({ body: annInput }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -656,15 +802,15 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
       return;
     }
     setAnnInput("");
-    await loadAnns(me.id);
+    await loadAnns();
   };
 
   const decideDraft = async (id: number, action: "confirm" | "reject") => {
     await fetch("/api/attendance/drafts/" + id, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, user: me.id }),
+      body: JSON.stringify({ action }),
     });
-    await loadVillage(me.id);
+    await loadVillage();
   };
 
   const pickedPerson = picked ? people.find((p) => Number(p.id) === picked.id) : undefined;
@@ -701,10 +847,19 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
 
   return (
     <main className="min-h-screen" style={{ background: "var(--tk-paper)" }}>
-      {/* ヘッダはアプリ名だけ。正常な接続は既定なので出さない（切断のときだけ赤く出す） */}
+      {/* ヘッダはアプリ名だけ。正常な接続は既定なので出さない。
+          出し分け（段階7）:
+            - 最初の接続まで: 「接続しています」を静かに出す（無言で待たせない）
+            - 見るだけの人:   それ以上は出さない。**元々動かせないので、接続の有無は関係がない**
+            - ログイン済み:   繋がらなくなったら赤く出す。動かせるはずのものが動かないため */}
       <header className="tk-head flex items-center gap-3 px-4 py-1.5">
         <h1 className="text-sm font-bold tracking-widest">tenko</h1>
-        {conn !== "接続中" && (
+        {conn !== "接続中" && !everConnected && (
+          <span className="px-1.5 py-0.5 text-[10px] tk-soft" role="status">
+            接続しています…
+          </span>
+        )}
+        {conn !== "接続中" && everConnected && !isGuest && (
           <span
             className="border border-[var(--tk-ink)] px-2 py-0.5 text-[11px] font-bold text-white"
             style={{ background: "var(--tk-red)" }}
@@ -714,15 +869,48 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
             {stale && "（表示は切断前のものです）"}
           </span>
         )}
-        {/* 認証が無いことを利用者にも見える形で出す（6-3）。
-            目立ちすぎず、しかし気づける位置に置く。README にも記載 */}
-        <span
-          className="border border-[var(--tk-ink)] px-1.5 py-0.5 text-[10px]"
-          style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
-          title="URLの me= を変えると誰にでもなりすませます。本番では使えません"
-        >
-          お試し版・ログインなし（誰にでもなりすませます）
-        </span>
+        {/* 在席の同期が止まったとき（段階7）。
+            村が空に見えることと、同期が止まっていることを区別できるようにする。
+            勤怠のアプリで村が空に見えると「誰も働いていない」という誤った主張になる */}
+        {syncStopped && (
+          <span
+            className="border border-[var(--tk-ink)] px-2 py-0.5 text-[11px] font-bold"
+            style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
+            role="alert"
+          >
+            在席の同期が止まっています（村の人数は実際と違うかもしれません）
+          </span>
+        )}
+        {/* 段階2までは「お試し版・ログインなし（誰にでもなりすませます）」を常時出していた。
+            段階3で認証が入り、その表示は実態と食い違うようになったため差し替えた。
+            いまは「見るだけかどうか」を出す。見るだけの人には、そう分かる形にする */}
+        {isGuest ? (
+          <span
+            className="border border-[var(--tk-ink)] px-1.5 py-0.5 text-[10px]"
+            style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
+            title="ログインすると、自分のアバターが村に出ます"
+          >
+            見るだけ（ログインしていません）
+          </span>
+        ) : (
+          <span className="px-1.5 py-0.5 text-[10px] tk-soft" title="ログインしています">
+            {me.name}
+          </span>
+        )}
+        {isGuest && (
+          <Link href="/login" className="tk-btn px-2 py-0.5 text-[10px]">ログイン</Link>
+        )}
+        {/* セッションが切れたとき。黙って古い画面を映し続けない（段階3のチャットと同じ考え方）*/}
+        {sessionLost && !isGuest && (
+          <span
+            className="border border-[var(--tk-ink)] px-1.5 py-0.5 text-[10px] font-bold text-white"
+            style={{ background: "var(--tk-red)" }}
+            role="alert"
+          >
+            ログインの期限が切れました
+            <Link href="/login" className="ml-1 underline">入り直す</Link>
+          </span>
+        )}
         {debug && (
           <span className="ml-auto flex items-center gap-2 text-[11px]">
             <button onClick={() => setOccupants((v) => (v === "show" ? "hide" : "show"))} className="tk-btn tk-btn-quiet px-1.5 py-0.5">
@@ -1060,6 +1248,11 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
                       <Link href="/attendance" className={menuBtn}>勤怠の確認・修正申請</Link>
                       {canApprove && <Link href="/approvals" className={menuBtn}>承認する</Link>}
                       <button onClick={leaveVillage} className={menuBtn}>退勤（村から消える）</button>
+                      {/* ログアウトの導線。
+                          ヘッダではなくここに置いた。ヘッダは村の外の操作（接続の状態）を出す場所で、
+                          自分に対する操作（状態を変える・退勤する）はすべてこのメニューに集めてあるため。
+                          「退勤」の隣に置くことで、終わりの操作がひとまとまりになる */}
+                      <button onClick={() => void doSignOut()} className={menuBtn}>ログアウト</button>
                     </div>
                     <p className="text-[10px]" style={{ color: "var(--tk-ink-soft)" }}>
                       表示名は管理者が決めます（この画面では変えられません）
@@ -1071,7 +1264,23 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
                     <p>
                       今日やること: {notes[picked.id] ? notes[picked.id] : <span style={{ color: "var(--tk-ink-soft)" }}>未記入</span>}
                     </p>
-                    {pickedPerson && confirmCall !== picked.id && (
+                    {/* デモ用の利用者には呼びかけない。
+                        押せてしまうと「返事が来ない＝壊れている」に見える。
+                        押す前に、返事をしない人であることを伝える（Phase 5 段階5）*/}
+                    {pickedPerson?.demo && (
+                      <p className="border border-[var(--tk-ink)] p-1.5 text-[11px] leading-4"
+                         style={{ background: "var(--tk-paper-2)" }}>
+                        この人は、村の様子を見せるために置いてあるデモの利用者です。
+                        呼びかけても返事はしません。
+                      </p>
+                    )}
+                    {isGuest && !pickedPerson?.demo && (
+                      <p className="border border-[var(--tk-ink)] p-1.5 text-[11px] leading-4"
+                         style={{ background: "var(--tk-paper-2)" }}>
+                        呼びかけるにはログインが必要です。
+                      </p>
+                    )}
+                    {pickedPerson && !pickedPerson.demo && !isGuest && confirmCall !== picked.id && (
                       <button onClick={() => callTo(picked.id)} className="tk-btn w-full justify-center text-xs">
                         呼びかける
                         {(pickedPerson.talk ?? "ok") === "later" && "（後でならOK）"}
@@ -1178,12 +1387,19 @@ export default function VillagePage({ initialRooms }: { initialRooms: Room[] }) 
               <button onClick={() => setShowAnns(false)} className="tk-btn tk-btn-quiet ml-auto px-2 py-0.5 text-xs">閉じる</button>
             </div>
             <ul className="flex-1 overflow-y-auto">
-              {anns.length === 0 && (
+              {/* 未ログインには中身を出さない。押せることは分かるが、読めない */}
+              {isGuest && (
+                <li className="px-3 py-6 text-center text-xs" style={{ color: "var(--tk-ink-soft)" }}>
+                  <p className="mb-2">村のお知らせは、ログインすると読めます。</p>
+                  <Link href="/login" className="tk-btn px-3 py-1 text-xs">ログイン</Link>
+                </li>
+              )}
+              {!isGuest && anns.length === 0 && (
                 <li className="px-3 py-6 text-center text-xs" style={{ color: "var(--tk-ink-soft)" }}>
                   お知らせはまだありません
                 </li>
               )}
-              {anns.map((a) => (
+              {!isGuest && anns.map((a) => (
                 <li key={a.id} className="tk-sep px-3 py-2">
                   <div className="flex items-baseline gap-2">
                     <span className="text-xs font-bold">{a.displayName}</span>

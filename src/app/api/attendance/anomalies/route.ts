@@ -7,15 +7,13 @@
 // 対象の絞り込みはSQL側で行う。user を指定して他人の分だけを取ることはできない。
 // 自動修正は一切しない。読み取りのみ。
 import { NextRequest, NextResponse } from "next/server";
-import { getActor } from "@/lib/approval";
-import { requestedUserId } from "@/lib/actor";
+import { currentActor, unauthorized } from "@/lib/actor";
 import { findAnomalies, targetUserIds, ANOMALY_LABEL, LONG_WORK_HOURS, ANOMALY_DAYS } from "@/lib/anomaly";
 
 export async function GET(req: NextRequest) {
-  const actorId = requestedUserId(req.nextUrl.searchParams.get("user"));
-  if (actorId <= 0) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
-  const actor = await getActor(actorId);
-  if (!actor) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
+  // 誰として見るかはセッションが決める。?user= は読まない（Phase 5 段階3）
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
 
   const ids = await targetUserIds(actor.id, actor.role);
 
@@ -33,7 +31,7 @@ export async function GET(req: NextRequest) {
 
   const anomalies = await findAnomalies(scope);
   return NextResponse.json({
-    actor,
+    actor: { id: actor.id, role: actor.role },
     scope,
     thresholds: { longWorkHours: LONG_WORK_HOURS, days: ANOMALY_DAYS },
     labels: ANOMALY_LABEL,

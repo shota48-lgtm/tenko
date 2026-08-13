@@ -10,16 +10,15 @@
 //   GET : 自分の申請と、自分が承認できる相手の申請
 import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
-import { getActor } from "@/lib/approval";
-import { requestedUserId } from "@/lib/actor";
+import { currentActor, unauthorized, assertSameOrigin } from "@/lib/actor";
 import { TENKO_TZ } from "@/lib/notes";
 
 const KINDS = ["arrive", "leave", "break", "late"];
 
-export async function GET(req: NextRequest) {
-  const actorId = requestedUserId(req.nextUrl.searchParams.get("user"));
-  const actor = await getActor(actorId);
-  if (!actor) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
+export async function GET() {
+  // 見える範囲は role と manager_id が決める。?user= は読まない（Phase 5 段階3）
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
 
   const { rows } = await pool.query(
     `SELECT c.id, c.user_id, u.display_name, c.kind, c.event_at, c.work_date::text AS work_date,
@@ -36,16 +35,18 @@ export async function GET(req: NextRequest) {
       LIMIT 200`,
     [actor.id, actor.role],
   );
-  return NextResponse.json({ actor, corrections: rows });
+  return NextResponse.json({ actor: { id: actor.id, role: actor.role }, corrections: rows });
 }
 
 export async function POST(req: NextRequest) {
-  let body: { user?: unknown; correctsRecordId?: unknown; kind?: unknown; eventAt?: unknown; reason?: unknown };
-  try { body = await req.json(); } catch { return NextResponse.json({ error: "JSON として読めません" }, { status: 400 }); }
+  const bad = assertSameOrigin(req);
+  if (bad) return bad;
+  // 申請するのは自分の記録に対してだけ。誰として申請するかはセッションが決める
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
 
-  const actorId = requestedUserId(body.user);
-  const actor = await getActor(actorId);
-  if (!actor) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
+  let body: { correctsRecordId?: unknown; kind?: unknown; eventAt?: unknown; reason?: unknown };
+  try { body = await req.json(); } catch { return NextResponse.json({ error: "JSON として読めません" }, { status: 400 }); }
 
   const reason = typeof body.reason === "string" ? body.reason.trim() : "";
   if (reason.length === 0) return NextResponse.json({ error: "修正の理由が必要です" }, { status: 400 });

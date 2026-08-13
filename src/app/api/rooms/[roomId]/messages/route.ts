@@ -8,9 +8,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
 import { notifyNewMessage } from "@/lib/notify";
 import { createDraftFromMessage } from "@/lib/drafts";
+import { currentActor, unauthorized, assertSameOrigin } from "@/lib/actor";
 
-// 認証は Phase 1 の範囲外。利用者は暫定的に固定値で扱う
-const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1);
+// Phase 5 段階3 まで、この経路だけが actor.ts を通らず
+// `const CURRENT_USER_ID = Number(process.env.TENKO_DEV_USER_ID ?? 1)` を持っていた。
+// 発言は勤怠の下書きの根拠になるため、なりすませると勤怠まで偽装できる。
+// 発言の持ち主は**セッションの人に固定する**。本文に user が入っていても読まない
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -19,6 +22,10 @@ type Ctx = { params: Promise<{ roomId: string }> };
 // GET /api/rooms/:roomId/messages?after=<id>&limit=<n>
 // after より後の投稿を古い順に返す。再接続したクライアントが差分を埋めるための経路
 export async function GET(req: NextRequest, { params }: Ctx) {
+  // チャットの本文はログインした人だけが読める
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
+
   const { roomId } = await params;
   const roomIdNum = Number(roomId);
   if (!Number.isInteger(roomIdNum) || roomIdNum <= 0) {
@@ -61,6 +68,12 @@ export async function GET(req: NextRequest, { params }: Ctx) {
 // POST /api/rooms/:roomId/messages
 // body: { clientMsgId: uuid, body: string }
 export async function POST(req: NextRequest, { params }: Ctx) {
+  const bad = assertSameOrigin(req);
+  if (bad) return bad;
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
+  const CURRENT_USER_ID = actor.id;
+
   const { roomId } = await params;
   const roomIdNum = Number(roomId);
   if (!Number.isInteger(roomIdNum) || roomIdNum <= 0) {

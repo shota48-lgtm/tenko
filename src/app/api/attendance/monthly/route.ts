@@ -1,23 +1,24 @@
 // 月次の勤怠記録。CSV で返す。
 // 自分の記録か、自分が承認できる相手の記録だけを出す（判定は API 側で行う）
 import { NextRequest, NextResponse } from "next/server";
-import { requestedUserId } from "@/lib/actor";
-import { getActor, canApprove } from "@/lib/approval";
+import { currentActor, unauthorized } from "@/lib/actor";
+import { canApprove } from "@/lib/approval";
 import { monthly, toCsv } from "@/lib/monthly";
 
 
 export async function GET(req: NextRequest) {
+  // 誰として見るかはセッションが決める。?actor= は読まない（Phase 5 段階3）。
+  // ?user=（誰の分を見るか）は残す。他人の分は canApprove を通ったときだけ出る
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
+
   const q = req.nextUrl.searchParams;
-  const actorId = requestedUserId(q.get("actor"));
-  const targetId = Number(q.get("user") ?? actorId);
+  const targetId = Number(q.get("user") ?? actor.id);
   const year = Number(q.get("year"));
   const month = Number(q.get("month"));
   if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
     return NextResponse.json({ error: "year と month が必要です" }, { status: 400 });
   }
-
-  const actor = await getActor(actorId);
-  if (!actor) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
 
   if (actor.id !== targetId) {
     const permit = await canApprove(actor, targetId);

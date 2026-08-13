@@ -13,24 +13,17 @@
 //   行は消さず deleted_at を入れる。誰が何を出したかを後から追えるようにするため。
 import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
-import { requestedUserId } from "@/lib/actor";
+import { currentActor, unauthorized, forbidden, assertSameOrigin } from "@/lib/actor";
 import { sanitizeNote } from "@/lib/notes";
 
 const BODY_MAX = 200;
 
-// 誰がこのリクエストを出したか、その役割は何か。必ずDBから引く
-async function actor(req: NextRequest, bodyUser?: unknown) {
-  const id = requestedUserId(bodyUser ?? req.nextUrl.searchParams.get("user"));
-  const { rows } = await pool.query(
-    `SELECT id, role FROM users WHERE id = $1 AND deleted_at IS NULL`,
-    [id],
-  );
-  return rows.length === 0 ? null : { id: Number(rows[0].id), role: String(rows[0].role) };
-}
+// 誰がこのリクエストを出したか、その役割は何かは currentActor() が決める（Phase 5 段階3）。
+// セッションから引き、役割は毎回 users を引き直す。?user= も body.user も読まない
 
-export async function GET(req: NextRequest) {
-  const me = await actor(req);
-  if (!me) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
+export async function GET() {
+  const me = await currentActor();
+  if (!me) return unauthorized();
 
   const { rows } = await pool.query(
     `SELECT a.id, a.body, a.created_at, u.display_name
@@ -60,12 +53,12 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const bad = assertSameOrigin(req);
+  if (bad) return bad;
+  const me = await currentActor();
+  if (!me) return unauthorized();
+  if (me.role !== "admin") return forbidden("お知らせを書けるのは管理者のみです");
   const raw = await req.json().catch(() => ({}));
-  const me = await actor(req, raw.user);
-  if (!me) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
-  if (me.role !== "admin") {
-    return NextResponse.json({ error: "お知らせを書けるのは管理者のみです" }, { status: 403 });
-  }
   // 検証は notes.ts と同じものを使う。制御文字・双方向制御・ゼロ幅は落ちる
   const clean = sanitizeNote(raw.body, BODY_MAX);
   if (!clean.ok) {
@@ -81,9 +74,10 @@ export async function POST(req: NextRequest) {
 
 // 既読にする。自分の分だけ。誰の分を更新するかはサーバーが決める
 export async function PUT(req: NextRequest) {
-  const raw = await req.json().catch(() => ({}));
-  const me = await actor(req, raw.user);
-  if (!me) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
+  const bad = assertSameOrigin(req);
+  if (bad) return bad;
+  const me = await currentActor();
+  if (!me) return unauthorized();
 
   const { rows } = await pool.query(
     `SELECT COALESCE(max(id), 0) AS last FROM announcements WHERE deleted_at IS NULL`,
@@ -101,12 +95,12 @@ export async function PUT(req: NextRequest) {
 
 // 消す。admin のみ。行は残し、消した印を付ける
 export async function DELETE(req: NextRequest) {
+  const bad = assertSameOrigin(req);
+  if (bad) return bad;
+  const me = await currentActor();
+  if (!me) return unauthorized();
+  if (me.role !== "admin") return forbidden("お知らせを消せるのは管理者のみです");
   const raw = await req.json().catch(() => ({}));
-  const me = await actor(req, raw.user);
-  if (!me) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
-  if (me.role !== "admin") {
-    return NextResponse.json({ error: "お知らせを消せるのは管理者のみです" }, { status: 403 });
-  }
   const id = Number(raw.id);
   if (!Number.isInteger(id) || id <= 0) {
     return NextResponse.json({ error: "id が不正です" }, { status: 400 });

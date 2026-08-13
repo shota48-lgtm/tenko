@@ -2,20 +2,22 @@
 //
 // 権限の検証はここで行う。画面を隠すだけでは、このAPIを直接叩かれれば通ってしまう。
 import { NextRequest, NextResponse } from "next/server";
-import { requestedUserId } from "@/lib/actor";
-import { getActor, canApprove, getRecord, approveRecord, returnRecord, resubmitRecord } from "@/lib/approval";
+import { currentActor, unauthorized, assertSameOrigin } from "@/lib/actor";
+import { canApprove, getRecord, approveRecord, returnRecord, resubmitRecord } from "@/lib/approval";
 
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function POST(req: NextRequest, { params }: Ctx) {
+  const bad = assertSameOrigin(req);
+  if (bad) return bad;
   const { id } = await params;
   const recordId = Number(id);
   if (!Number.isInteger(recordId) || recordId <= 0) {
     return NextResponse.json({ error: "id が不正です" }, { status: 400 });
   }
 
-  let body: { action?: unknown; reason?: unknown; user?: unknown; eventAt?: unknown };
+  let body: { action?: unknown; reason?: unknown; eventAt?: unknown };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "JSON として読めません" }, { status: 400 }); }
 
   const action = body.action;
@@ -23,8 +25,9 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     return NextResponse.json({ error: "action は approve / return / resubmit のいずれか" }, { status: 400 });
   }
 
-  const actor = await getActor(requestedUserId(body.user));
-  if (!actor) return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
+  // 誰として承認するかはセッションだけが決める。body.user は読まない（Phase 5 段階3）
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
 
   const record = await getRecord(recordId);
   if (!record) return NextResponse.json({ error: "記録が見つかりません" }, { status: 404 });

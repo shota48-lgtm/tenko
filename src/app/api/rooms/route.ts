@@ -2,8 +2,13 @@
 // kind は建物の種別（room = house / hall = 共有の建物）。並び順では決めない
 import { NextResponse } from "next/server";
 import { pool } from "@/lib/db";
+import { allowPublic } from "@/lib/public-view";
 
 export async function GET() {
+  // 見るだけモードが無効なら、ログインしていない人には返さない
+  const stop = await allowPublic();
+  if (stop) return stop;
+
   const { rows } = await pool.query(
     `SELECT id, name, kind, capacity, deco FROM rooms WHERE deleted_at IS NULL ORDER BY id ASC`,
   );

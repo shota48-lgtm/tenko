@@ -6,19 +6,14 @@
 //
 // 誰の分を返すかは actor.ts が決める。**他人の分は返さない。**
 //   未読も下書きも自分だけの情報であり、他人に配る理由がない（S4）。
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { pool } from "@/lib/db";
-import { requestedUserId } from "@/lib/actor";
+import { currentActor, unauthorized } from "@/lib/actor";
 
-export async function GET(req: NextRequest) {
-  const userId = requestedUserId(req.nextUrl.searchParams.get("user"));
-  const { rows: who } = await pool.query(
-    `SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL`,
-    [userId],
-  );
-  if (who.length === 0) {
-    return NextResponse.json({ error: "利用者が見つかりません" }, { status: 401 });
-  }
+export async function GET() {
+  const actor = await currentActor();
+  if (!actor) return unauthorized();
+  const userId = actor.id;
 
   // 部屋ごとの未読件数。read_states が無い部屋は「全部が未読」ではなく、
   // 参加していない部屋まで数えないよう room_members にある部屋だけを見る

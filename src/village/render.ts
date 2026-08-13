@@ -19,6 +19,9 @@ export type Presence = {
   // 決めるのは ws-server（画面側の値は信用しない）。まだ届いていない間だけ undefined
   x?: number;
   y?: number;
+  // デモ用の利用者（接続を持たず、常に村にいる人）。Phase 5 段階5。
+  // 呼びかけ・チャットの案内を変えるために使う（返事が来ないのを不具合に見せない）
+  demo?: boolean;
 };
 export type TalkStatus = "ok" | "later" | "focus";
 // 利用者ID -> 今日やること（機能1）
