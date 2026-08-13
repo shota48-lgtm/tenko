@@ -379,13 +379,24 @@ export default function VillagePage({
             // ここも名前はDBの表示名で引く（届いた値をそのまま出さない）
             setAnswered({ id: Number(d.from?.id), text: a });
           } else if (d.type === "auth.expired" || d.type === "auth.rejected") {
-            // セッションが無効になった（4001）／券が通らなかった（4003）。
-            // 続けて onclose が来るので、そこで券を取り直して繋ぎ直す。
+            // セッションが無効になった／券が通らなかった。
             //
-            // **画面にも出す（段階7）。** 黙って切ると、村が静かに空になり、
+            // **close code に頼らない（段階7-B。本番で実測した）。**
+            //   手元では close(4001) / close(4003) がそのまま画面に届く（spike/ws-auth-01）。
+            //   **本番（Render 越し）では、こうなる:**
+            //     この知らせ  : 254 ms で届く
+            //     close      : **20,254 ms 後**に届き、しかも **code は 1006 に置き換わる**
+            //   プロキシが close を20秒ほど遅らせ、コードを捨てている。
+            //   close code を待つ形だと、券を取り直すまでに20秒かかり、
+            //   しかも 4001 と 4003 の区別が失われる。
+            //   したがって、**繋ぎ直しの引き金はこの知らせにする。** close code は届けば使う程度に留める。
+            //
+            // 画面にも出す。黙って切ると村が静かに空になり、
             // 勤怠のアプリで「誰も働いていない」という誤った主張になる
             console.warn("[ws] " + d.type + ": " + d.reason);
             if (!isGuest) setSyncStopped(true);
+            // 自分から閉じる。onclose が動き、いつもの繋ぎ直しの経路に乗る
+            try { ws.close(); } catch { /* 既に閉じている */ }
           }
         } catch { /* 解釈できない通知は捨てる */ }
       };
@@ -395,8 +406,12 @@ export default function VillagePage({
         setStale(true);
         // 4001（セッションが無効）と 4003（券が通らない）は、券を取り直せば入れることがある。
         // **すぐに繋ぎ直すのは1回だけ**。以後は間隔を倍にする（上限30秒）。
-        // 空けないと、セッションが本当に無効なときに券の要求が際限なく増える
-        const retryNow = (e.code === 4001 || e.code === 4003) && delay === 1000;
+        // 空けないと、セッションが本当に無効なときに券の要求が際限なく増える。
+        //
+        // 本番では close code が届かないことがあるため（段階7-B）、
+        // 知らせ（auth.expired / auth.rejected）を受けて自分で閉じた場合もここに来る。
+        // その場合 e.code は 1005（コード無し）になるので、それも「取り直す」に含める
+        const retryNow = (e.code === 4001 || e.code === 4003 || e.code === 1005) && delay === 1000;
         const wait = retryNow ? 500 : delay;
         timer = setTimeout(() => { delay = Math.min(delay * 2, 30_000); void connect(); }, wait);
       };
