@@ -26,6 +26,7 @@ import {
   type Presence, type Room, type NoteMap, type TalkStatus, type RoomCounts, type OccupantsMode,
 } from "@/village/render";
 import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/village/demo-drift";
+import SidePanel, { SIDE_PANEL_W } from "./side-panel";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 村の拡大率。
@@ -155,6 +156,9 @@ export default function VillagePage({
   // 村の拡大率。"fit" は画面に全体が入る大きさ、"close" は2倍（スクロールする）
   const [zoom, setZoom] = useState<"fit" | "close">("fit");
   const [fitScale, setFitScale] = useState(ZOOM_CLOSE);
+  // 窓の幅。サイドパネルを村の隣に置けるかの判定にだけ使う。
+  // **拡大率の計算には入れない**（入れると、パネルを出した分だけ村が小さくなる）
+  const [winW, setWinW] = useState(0);
   // ドラッグ中に、いま入る建物
   const [dropTarget, setDropTarget] = useState<number | null>(null);
   // 装飾を地に馴染ませるか（作業4-3）。?debug=1 で切り替えて見比べられる
@@ -493,12 +497,22 @@ export default function VillagePage({
       const h = window.innerHeight - 120;
       const s = Math.min(w / VILLAGE_W, h / VILLAGE_H, ZOOM_CLOSE);
       setFitScale(Math.max(ZOOM_MIN, Math.floor(s * 20) / 20));
+      setWinW(window.innerWidth);
     };
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
   }, []);
   const SCALE = zoom === "close" ? ZOOM_CLOSE : fitScale;
+
+  // サイドパネルを出すかどうか。
+  //
+  // 村の大きさは先に決まっている（上の測り方は変えていない）。
+  // その村を置いたうえで 300px が余るかどうかだけで決める。並べられないなら出さない。
+  // 内訳: 外側の余白 p-3 が左右で 24px、村との隙間 gap-3 が 12px、
+  //       メンバー一覧を開いていれば その幅 288px（w-72）と隙間 12px
+  const sidePanelMinW = VILLAGE_W * SCALE + SIDE_PANEL_W + 12 + 24 + (showRoster ? 288 + 12 : 0);
+  const showSidePanel = winW >= sidePanelMinW;
 
   // 建物の中の人を隠す案（案2）では、その人の吹き出しも出さない。
   // マウスを乗せている人は先頭に回し、上限に関係なく必ず出す
@@ -1411,6 +1425,18 @@ export default function VillagePage({
             )}
           </div>
         </div>
+
+        {/* 村だけでは数えられないことを補うパネル（作業: サイドパネル）。
+            村の幅は変えていないので、余りが足りない画面では出さない */}
+        {showSidePanel && (
+          <SidePanel
+            people={people}
+            rooms={rooms}
+            counts={counts}
+            notes={notes}
+            nameOf={nameOf}
+          />
+        )}
 
         {showRoster && (
           <aside className="tk-panel w-72 shrink-0">
