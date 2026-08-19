@@ -76,13 +76,25 @@ export async function startVoice(opts: {
   send: SignalSender;
   onRemoteStream: (stream: MediaStream) => void;
   onState?: (state: RTCPeerConnectionState) => void;
+  /**
+   * 中継サーバー（TURN）の設定（段階4）。
+   * 使い捨ての合言葉つきで /api/turn-credentials から受け取ったものを、そのまま渡す。
+   * **渡されなければ段階3と同じく STUN だけで動く。** 中継が使えないことは、
+   * 通話を始められないことではない（直接つながる相手とは繋がる）
+   */
+  iceServers?: RTCIceServer[];
 }): Promise<VoiceCall> {
   const { peerId, role, send, onRemoteStream, onState } = opts;
 
   // 音声だけ。映像は取らない（取ると許可の求め方が変わり、通信量も跳ね上がる）
   const local = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
 
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: STUN_URLS }] });
+  // STUN は必ず入れる。中継の設定は、あれば後ろに足す。
+  // **STUN_URLS の値は変えない**（段階3で確かめた、無料・無登録のもの）
+  const iceServers: RTCIceServer[] = [{ urls: STUN_URLS }, ...(opts.iceServers ?? [])];
+  console.log("[voice] 中継サーバーの設定: " + ((opts.iceServers?.length ?? 0) > 0 ? "あり" : "無し（STUNのみ）"));
+
+  const pc = new RTCPeerConnection({ iceServers });
   for (const track of local.getTracks()) pc.addTrack(track, local);
 
   // 相手の接続情報が入る前に届いた候補は、ここに溜めてから入れる。

@@ -1135,9 +1135,33 @@ export default function VillagePage({
     let cancelled = false;
     void (async () => {
       try {
+        // 中継サーバー（TURN）の使い捨ての合言葉を、**通話を始める直前に**取りに行く（段階4）。
+        //
+        // 開いたときにまとめて取らない理由:
+        //   合言葉には期限がある。画面を開いたまま何時間も置かれると、
+        //   いざ通話するときには切れている。通話1回につき1度取るのが確実で、
+        //   呼び出し回数も通話の回数までにしかならない。
+        //
+        // **取れなくても通話を止めない。** 失敗したときと、合言葉が無いと返ってきたときは
+        // STUN だけで始める（段階3と同じ動き）。直接つながる相手とはそれで繋がる
+        let iceServers: RTCIceServer[] = [];
+        try {
+          const res = await fetch("/api/turn-credentials");
+          if (res.ok) {
+            const d = await res.json();
+            iceServers = Array.isArray(d?.iceServers) ? d.iceServers : [];
+          } else {
+            console.warn("[voice] 中継の合言葉を取れなかった: status " + res.status + "（STUNのみで続ける）");
+          }
+        } catch (e) {
+          console.warn("[voice] 中継の合言葉を取りに行けなかった（STUNのみで続ける）", e);
+        }
+        if (cancelled) return;
+
         const v = await startVoice({
           peerId: call.peerId,
           role: call.role,
+          iceServers,
           send: (m) => { send(m); },
           onRemoteStream: (stream) => {
             const a = audioRef.current;
