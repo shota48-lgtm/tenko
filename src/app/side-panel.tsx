@@ -16,6 +16,9 @@
 //     UI_SPEC.md のカード仕様（角丸16px・2段影・hoverの移動）とは衝突するため、
 //     POの判断で既存意匠を正とした（2026-08-19）
 import type { NoteMap, Presence, Room, RoomCounts, TalkStatus } from "@/village/render";
+// 月次の集計の型。monthly-format.ts は DB に触れないため、画面から型だけ借りてよい。
+// 数え方（何を出勤日数と呼ぶか）は lib/monthly.ts が決める。ここでは出すだけ
+import type { MonthlyResult } from "@/lib/monthly-format";
 
 // パネルの幅。村と並べられるかの判定（village-client 側）と同じ値を使う
 export const SIDE_PANEL_W = 300;
@@ -46,13 +49,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function SidePanel({
-  people, rooms, counts, notes, nameOf,
+  people, rooms, counts, notes, nameOf, monthly,
 }: {
   people: Presence[];
   rooms: Room[];
   counts: RoomCounts;
   notes: NoteMap;
   nameOf: (id: number) => string;
+  // 自分の今月の勤怠。**未ログインのときと、取れなかったときは null。**
+  // null ならパネルごと出さない（空の枠も、断りの文も出さない）
+  monthly?: MonthlyResult["total"] | null;
 }) {
   const tally = COUNT_STATES.map((s) => ({
     label: s.label,
@@ -134,6 +140,29 @@ export default function SidePanel({
           })}
         </ul>
       </Section>
+
+      {/* 今月の勤怠。集計そのものは /api/attendance/monthly が返した値をそのまま出す。
+          ここで足したり丸めたりしない（給与計算の根拠になりうる出力のため。lib/monthly.ts の方針）。
+          0 の項目も消さない。「0日」と「その項目が無い」は別のことなので */}
+      {monthly && (
+        <Section title="今月の勤怠">
+          <ul className="py-1">
+            {[
+              { label: "出勤", value: monthly.work_days, unit: "日" },
+              { label: "遅刻", value: monthly.late_days, unit: "日" },
+              { label: "承認済み", value: monthly.approved, unit: "件" },
+              { label: "未承認", value: monthly.unapproved, unit: "件" },
+            ].map((r) => (
+              <li key={r.label} className="flex items-center gap-2 px-3 py-0.5 text-xs">
+                <span className="truncate">{r.label}</span>
+                <span className="ml-auto shrink-0 tabular-nums" style={{ color: "var(--tk-ink-soft)" }}>
+                  {r.value}{r.unit}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
     </aside>
   );
 }
