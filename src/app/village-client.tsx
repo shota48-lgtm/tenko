@@ -28,6 +28,7 @@ import {
 import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/village/demo-drift";
 import SidePanel, { SIDE_PANEL_W } from "./side-panel";
 import type { MonthlyResult } from "@/lib/monthly-format";
+import { startVoice, type VoiceCall } from "@/lib/webrtc";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 村の拡大率。
@@ -218,6 +219,15 @@ export default function VillagePage({
   const callRef = useRef<{ peerId: number; role: "caller" | "callee" } | null>(null);
   // 名前を引きに行った利用者ID。同じIDで何度も取りに行かないために覚える
   const triedNamesRef = useRef<Set<number>>(new Set());
+  // 音声の接続（段階3）。**マイクを掴んでいるのはこの中だけ。**
+  // 通話していない間は必ず null にする
+  const voiceRef = useRef<VoiceCall | null>(null);
+  // 接続ができる前に届いた合図を溜める場所。
+  // 承認した側は即座に offer を送るが、呼びかけた側はマイクの許可を待っている間に
+  // それを受け取ることがある。捨てると通話が始まらない
+  const pendingSignalsRef = useRef<{ kind: "offer" | "answer" | "candidate"; value: unknown }[]>([]);
+  // 相手の声を鳴らす要素。canvas には音を出せないので DOM に置く
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => { callRef.current = call; }, [call]);
 
   useEffect(() => { myStateRef.current = myState; }, [myState]);
@@ -240,6 +250,30 @@ export default function VillagePage({
     if (isGuest) return false;
     return send({ type: "presence.set", user: userRef.current, state, roomId: null, talk: talkStatus });
   }, [send, isGuest]);
+
+  // 音声の接続を閉じる（段階3）。**マイクを止めるのはここ1か所に集める。**
+  // 切ったとき・相手が切ったとき・画面を離れるときの3つから呼ぶ
+  const closeVoice = useCallback(() => {
+    voiceRef.current?.close();
+    voiceRef.current = null;
+    pendingSignalsRef.current = [];
+    const a = audioRef.current;
+    if (a) { a.pause(); a.srcObject = null; }
+  }, []);
+
+  // 届いた合図をブラウザに渡す。**中身は見ない。**
+  const applySignal = useCallback(async (kind: "offer" | "answer" | "candidate", value: unknown) => {
+    const v = voiceRef.current;
+    if (!v) return;
+    try {
+      if (kind === "offer") await v.handleOffer(String(value ?? ""));
+      else if (kind === "answer") await v.handleAnswer(String(value ?? ""));
+      else await v.addCandidate(value);
+    } catch (e) {
+      // 段階3では画面に出さない。出し方は段階5で決める
+      console.warn("[voice] 合図を適用できなかった: " + kind, e);
+    }
+  }, []);
 
   // セッションが切れたとき。
   //
@@ -454,9 +488,17 @@ export default function VillagePage({
             setIncoming(null);
             setCallNotice("他の端末で応答しました");
           } else if (d.type === "call.hangup") {
-            // 相手が切った。自分の状態も解く
+            // 相手が切った。音声の接続とマイクを先に閉じ、そのあと状態を解く（段階3）
+            closeVoice();
             setCall(null);
             setCallNotice("通話が終わりました");
+          } else if (d.type === "call.offer" || d.type === "call.answer" || d.type === "call.candidate") {
+            // 音声を繋ぐための合図（段階3）。**中身は解釈せず、そのままブラウザに渡す。**
+            // 接続の用意ができていなければ溜めておく（マイクの許可を待っている間に届くため）
+            const kind = d.type === "call.offer" ? "offer" : d.type === "call.answer" ? "answer" : "candidate";
+            const value = kind === "candidate" ? d.candidate : d.sdp;
+            if (voiceRef.current) void applySignal(kind, value);
+            else pendingSignalsRef.current.push({ kind, value });
           } else if (d.type === "call.sent") {
             setCallNotice("呼びかけました。相手の返事を待っています");
           } else if (d.type === "call.denied") {
@@ -1038,9 +1080,50 @@ export default function VillagePage({
   // 自分の画面が「通話中」のまま残らないようにするため
   const hangUp = useCallback(() => {
     const peer = callRef.current?.peerId;
+    // 音声とマイクを先に止める。相手に知らせる前に止めることで、
+    // 送信に失敗しても自分のマイクが掴まれたままにならない（段階3）
+    closeVoice();
     setCall(null);
     if (peer != null) send({ type: "call.hangup", to: peer });
-  }, [send]);
+  }, [send, closeVoice]);
+
+  // 通話の状態が立ったら音声を繋ぐ。**マイクを取るのはここだけ**（段階3）。
+  //
+  // 承認した側（callee）が接続情報を作って送り、呼びかけた側（caller）は待つ
+  // （ws-messages.ts の設計メモ 2 のとおり）。
+  // 許可を待っている間に相手の合図が届くことがあるので、溜めてあった分を後から流す。
+  // 通話が終われば（call が null になれば）閉じる。マイクもここで止まる
+  useEffect(() => {
+    if (!call) { closeVoice(); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const v = await startVoice({
+          peerId: call.peerId,
+          role: call.role,
+          send: (m) => { send(m); },
+          onRemoteStream: (stream) => {
+            const a = audioRef.current;
+            if (!a) return;
+            a.srcObject = stream;
+            void a.play().catch((e) => console.warn("[voice] 相手の声を鳴らせなかった", e));
+          },
+        });
+        if (cancelled) { v.close(); return; }
+        voiceRef.current = v;
+        const queued = pendingSignalsRef.current;
+        pendingSignalsRef.current = [];
+        for (const q of queued) await applySignal(q.kind, q.value);
+      } catch (e) {
+        // マイクが取れない・断られた。段階3では画面に出さず、記録だけ残す（段階5で扱う）
+        console.warn("[voice] 通話を始められなかった（マイクの許可が下りなかった可能性）", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [call, send, closeVoice, applySignal]);
+
+  // 画面を離れるとき。**マイクを掴んだままにしない**
+  useEffect(() => () => closeVoice(), [closeVoice]);
 
   // 呼びかけへの返事。
   //
@@ -1585,6 +1668,12 @@ export default function VillagePage({
           </aside>
         )}
       </div>
+
+      {/* 相手の声（段階3）。見えるものは何も出さない。
+          canvas からは音を出せないため、DOM にこの要素を1つ置く。
+          srcObject を入れるのは webrtc.ts から受け取った時点だけで、
+          通話していない間は空にしてある */}
+      <audio ref={audioRef} autoPlay playsInline className="hidden" />
 
       {/* 画面下部。説明文は置かない（説明が要るUIは直す側）*/}
       <nav className="tk-head fixed inset-x-0 bottom-0 flex items-center gap-2 border-t px-4 py-1.5 text-xs">
