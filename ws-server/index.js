@@ -618,7 +618,10 @@ wss.on("connection", (ws, req) => {
       const from = presence.get(ws);
       if (!from) return;
       const to = Number(msg.to);
-      if (!Number.isInteger(to) || to <= 0) return;
+      // 自分宛ての返事は転送しない（他の call 系5種と同じ扱いに揃えた）。
+      // ここだけ to === from.id を見ていなかったため、自分の別の接続からの返事が
+      // 自分に返り、通話中の相手が自分になっていた
+      if (!Number.isInteger(to) || to <= 0 || to === from.id) return;
       const answer = msg.answer === "accept" ? "accept" : msg.answer === "later" ? "later" : "decline";
       // 返事も同じ。名前は送らず、画面がDBの表示名で引き直す
       const payload = JSON.stringify({
