@@ -46,6 +46,18 @@ export type VoiceCall = {
   handleAnswer(sdp: string): Promise<void>;
   /** 追加の経路の候補を受けた */
   addCandidate(candidate: unknown): Promise<void>;
+  /**
+   * 自分の音声の送信を一時的に止める / 戻す。
+   *
+   * **止めるのは enabled であって stop ではない。**
+   * stop を呼ぶとトラックが終わり、戻すときにマイクを取り直すことになる
+   * （許可を求め直す形になり、通話中に断られると復帰できない）。
+   * enabled = false の間は無音が送られる。
+   * ブラウザのタブのマイクの印は出たままになる（掴んだままであるため。これは仕様）。
+   */
+  setMuted(muted: boolean): void;
+  /** いまミュートしているか */
+  isMuted(): boolean;
   /** 通話を終える。**マイクを必ず止める**（止めないとタブの印が残り続ける） */
   close(): void;
   /** いまマイクを掴んでいるか（試験と自己点検のために外から見えるようにしておく） */
@@ -131,6 +143,16 @@ export async function startVoice(opts: {
       const c = candidate as RTCIceCandidateInit;
       if (!remoteSet) { pending.push(c); return; }
       try { await pc.addIceCandidate(c); } catch (e) { console.warn("[voice] 候補を入れられなかった", e); }
+    },
+    setMuted(muted: boolean) {
+      if (closed) return;
+      // 画面側からトラックを直接触らせない。ここ1か所で切り替える
+      for (const track of local.getAudioTracks()) track.enabled = !muted;
+      console.log("[voice] ミュート: " + (muted ? "する" : "解除"));
+    },
+    isMuted() {
+      const tracks = local.getAudioTracks();
+      return tracks.length > 0 && tracks.every((t) => !t.enabled);
     },
     close() {
       if (closed) return;

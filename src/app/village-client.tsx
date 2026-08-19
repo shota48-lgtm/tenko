@@ -160,6 +160,9 @@ export default function VillagePage({
   const [call, setCall] = useState<{ peerId: number; role: "caller" | "callee" } | null>(null);
   // いま通話中なので呼びかけを受けなかった、という知らせ。黙って捨てると着信に気づけない
   const [missed, setMissed] = useState<number | null>(null);
+  // 自分の音声を止めているか。**通話ごとに false から始める**（前の通話の状態を持ち越さない）。
+  // 相手には送らない（段階1のメッセージの型を増やさない）。相手からは「無音」に聞こえる
+  const [muted, setMuted] = useState(false);
   // 集中中の相手に呼びかける前の確認
   const [confirmCall, setConfirmCall] = useState<number | null>(null);
   // 村の拡大率。"fit" は画面に全体が入る大きさ、"close" は2倍（スクロールする）
@@ -219,6 +222,9 @@ export default function VillagePage({
   const callRef = useRef<{ peerId: number; role: "caller" | "callee" } | null>(null);
   // 名前を引きに行った利用者ID。同じIDで何度も取りに行かないために覚える
   const triedNamesRef = useRef<Set<number>>(new Set());
+  // いま呼びかけている相手。**この中の人からの「いま話せます」でだけ通話に入る。**
+  // 呼びかけていない相手の承認や、自分の別の接続からの返事で通話に入らないための控え
+  const invitedRef = useRef<Set<number>>(new Set());
   // 音声の接続（段階3）。**マイクを掴んでいるのはこの中だけ。**
   // 通話していない間は必ず null にする
   const voiceRef = useRef<VoiceCall | null>(null);
@@ -257,8 +263,21 @@ export default function VillagePage({
     voiceRef.current?.close();
     voiceRef.current = null;
     pendingSignalsRef.current = [];
+    // 次の通話はミュートしていない状態から始める
+    setMuted(false);
     const a = audioRef.current;
     if (a) { a.pause(); a.srcObject = null; }
+  }, []);
+
+  // ミュートの切り替え。**画面側からトラックを直接触らない**（webrtc.ts の VoiceCall を通す）
+  const toggleMute = useCallback(() => {
+    const v = voiceRef.current;
+    if (!v) return;
+    setMuted((prev) => {
+      const next = !prev;
+      v.setMuted(next);
+      return next;
+    });
   }, []);
 
   // 届いた合図をブラウザに渡す。**中身は見ない。**
@@ -504,14 +523,32 @@ export default function VillagePage({
           } else if (d.type === "call.denied") {
             setCallNotice(String(d.reason ?? "呼びかけられませんでした"));
           } else if (d.type === "call.answered") {
+            const fromId = Number(d.from?.id);
+            // **自分自身からの返事はあり得ない。**
+            // ws-server の call.respond は、call.invite と違って宛先が自分でも通す
+            // （to === from.id を弾いていない）。そのため自分の別の接続が返事を送ると、
+            // 自分を相手とする「返事」が自分に届く。これを通すと
+            // 通話中の相手が自分になり、両方の画面に同じ名前が出る（段階3の不具合）
+            if (!Number.isInteger(fromId) || fromId <= 0 || fromId === userRef.current.id) {
+              console.warn("[call] 自分自身からの返事を捨てた: id=" + fromId);
+              return;
+            }
             const a = d.answer === "accept" ? "「いま話せます」と返事がありました"
               : d.answer === "later" ? "「あとで」と返事がありました"
                 : "「いまは難しい」と返事がありました";
             // ここも名前はDBの表示名で引く（届いた値をそのまま出さない）
-            setAnswered({ id: Number(d.from?.id), text: a });
+            setAnswered({ id: fromId, text: a });
             // 「いま話せます」なら通話に入る（段階2）。呼びかけた側はここが入口。
-            // 音はまだ出ない。段階3で、この時点から接続の交渉を始める
-            if (d.answer === "accept") setCall({ peerId: Number(d.from?.id), role: "caller" });
+            // **呼びかけた相手からの返事だけを受ける。**
+            // 呼びかけていない相手の「承認」で通話に入ると、意図しない相手と繋がる
+            if (d.answer === "accept") {
+              if (!invitedRef.current.has(fromId)) {
+                console.warn("[call] 呼びかけていない相手からの承認を捨てた: id=" + fromId);
+                return;
+              }
+              invitedRef.current.clear();
+              setCall({ peerId: fromId, role: "caller" });
+            }
           } else if (d.type === "auth.expired" || d.type === "auth.rejected") {
             // セッションが無効になった／券が通らなかった。
             //
@@ -1133,6 +1170,8 @@ export default function VillagePage({
   //   自分の他の接続へ配ってもらうために call.handled を別に送る。
   //   宛先は書かない（サーバーが接続から決めた自分の他の接続にだけ配る）
   const respondCall = useCallback((peerId: number, answer: "accept" | "later" | "decline") => {
+    // 自分自身へは返事をしない（自分と通話している状態になるため）
+    if (peerId === userRef.current.id) { setIncoming(null); return; }
     send({ type: "call.respond", to: peerId, answer });
     send({ type: "call.handled", answer });
     setIncoming(null);
@@ -1144,6 +1183,8 @@ export default function VillagePage({
     const target = people.find((p) => Number(p.id) === id);
     const focus = (target?.talk ?? "ok") === "focus";
     if (focus && !forced) { setConfirmCall(id); return; }
+    // 呼びかけた相手を覚える。返事が来たとき、この相手からのものかを確かめる
+    invitedRef.current.add(id);
     send({ type: "call.invite", to: id, knewFocus: focus });
     setConfirmCall(null);
     setPicked(null);
@@ -1632,6 +1673,8 @@ export default function VillagePage({
             monthly={monthly}
             call={call}
             onHangUp={hangUp}
+            muted={muted}
+            onToggleMute={toggleMute}
           />
         )}
 
