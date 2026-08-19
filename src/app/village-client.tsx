@@ -27,6 +27,7 @@ import {
 } from "@/village/render";
 import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/village/demo-drift";
 import SidePanel, { SIDE_PANEL_W } from "./side-panel";
+import type { MonthlyResult } from "@/lib/monthly-format";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 村の拡大率。
@@ -159,6 +160,8 @@ export default function VillagePage({
   // 窓の幅。サイドパネルを村の隣に置けるかの判定にだけ使う。
   // **拡大率の計算には入れない**（入れると、パネルを出した分だけ村が小さくなる）
   const [winW, setWinW] = useState(0);
+  // 自分の今月の勤怠（合計だけ）。取れなかったときは null のままにし、パネルを出さない
+  const [monthly, setMonthly] = useState<MonthlyResult["total"] | null>(null);
   // ドラッグ中に、いま入る建物
   const [dropTarget, setDropTarget] = useState<number | null>(null);
   // 装飾を地に馴染ませるか（作業4-3）。?debug=1 で切り替えて見比べられる
@@ -290,6 +293,15 @@ export default function VillagePage({
         .then((d) => setNoteInput(d.note?.body ?? "")).catch(() => {});
       void loadVillage();
       void loadAnns();
+      // 今月の勤怠。**開いたときの1回だけ**取る。
+      // 30秒ごとの取り直し（loadNotes / loadVillage）には入れない。
+      // 月の集計は頻繁に変わらず、呼び出し回数を増やすだけになるため。
+      // 失敗しても何も出さない（村が主役で、これは補いのため）
+      const now = new Date();
+      void fetch(`/api/attendance/monthly?year=${now.getFullYear()}&month=${now.getMonth() + 1}&format=json`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: MonthlyResult | null) => setMonthly(d?.total ?? null))
+        .catch(() => { /* 取れなくても村は描く */ });
     }, 0);
     return () => clearTimeout(t);
   }, [loadNotes, loadVillage, loadAnns, router, isGuest]);
@@ -1435,6 +1447,7 @@ export default function VillagePage({
             counts={counts}
             notes={notes}
             nameOf={nameOf}
+            monthly={monthly}
           />
         )}
 
