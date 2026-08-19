@@ -66,9 +66,20 @@ export type CallCandidate = { type: "call.candidate"; to: number; candidate: unk
  */
 export type CallHangup = { type: "call.hangup"; to: number };
 
+/**
+ * 呼びかけに応答したことを、**自分の他の端末に**知らせる（段階2）。
+ *
+ * 呼びかけは相手の全端末に届くため、1台で応答しても他の端末には出たままになる。
+ * call.respond は呼びかけた側にしか返らないので、これを別に送る。
+ *
+ * **宛先 to を持たない。** 配る先は「この接続の人の、他の接続」に固定する。
+ * 宛先を受け取ると、他人の端末の表示を消せることになるため（ws-server 側も to を読まない）。
+ */
+export type CallHandled = { type: "call.handled"; answer: "accept" | "later" | "decline" };
+
 export type ClientToServer =
   | PresenceSet | PresenceSync | PresenceMove | CallInvite | CallRespond
-  | CallOffer | CallAnswer | CallCandidate | CallHangup;
+  | CallOffer | CallAnswer | CallCandidate | CallHangup | CallHandled;
 
 // ---- サーバー -> 画面 ----
 
@@ -130,11 +141,17 @@ export type CallOfferRelayed = { type: "call.offer"; from: { id: number }; sdp: 
 export type CallAnswerRelayed = { type: "call.answer"; from: { id: number }; sdp: string };
 export type CallCandidateRelayed = { type: "call.candidate"; from: { id: number }; candidate: unknown };
 export type CallHangupRelayed = { type: "call.hangup"; from: { id: number } };
+/** 自分の別の端末が応答した。受けた端末は呼びかけの表示を閉じる（段階2-D） */
+export type CallHandledRelayed = {
+  type: "call.handled";
+  from: { id: number };
+  answer: "accept" | "later" | "decline";
+};
 
 export type ServerToClient =
   | PresenceList | MessageCreated
   | PresenceDenied | CallIncoming | CallAnswered | CallDenied | CallSent
-  | CallOfferRelayed | CallAnswerRelayed | CallCandidateRelayed | CallHangupRelayed;
+  | CallOfferRelayed | CallAnswerRelayed | CallCandidateRelayed | CallHangupRelayed | CallHandledRelayed;
 
 // ---- 送り手の役割 ----
 //
@@ -145,25 +162,30 @@ export const VIEWER_ALLOWED: ReadonlyArray<string> = [
   "presence.set", "presence.sync", "presence.move", "call.",
 ];
 
-// ---- 将来 音声通話を足すときにここへ追加する ----
+// ---- 音声通話の進み具合 ----
 //
-// 実装しない。何をどこに足せばよいかだけを残す。
+// 7段階に分けたうちの、どこまでが入っているかを書く。**ここは実装に合わせて直すこと。**
+// （段階1まではこの位置に「実装しない」という設計メモがあったが、実装したため書き換えた）
 //
 // 通話の入り方は「近づくと聞こえる」ではなく「呼びかけ → 相手が承認 → 通話開始」に決めた（POの判断）。
 // 近接音声は、常に聞かれているかもしれない状態を作り、心理的安全性を損なうため採用しない。
-// call.invite / call.respond（承認のやりとり）は Phase 4.8 で実装済み。残るのは音声そのもの。
+// call.invite / call.respond（承認のやりとり）は Phase 4.8 で実装済み。
 //
-// 1) 種別を3つ足す（P2Pメッシュのシグナリング。6人程度までなら SFU は不要）
-//      call.offer     { type, to: userId, sdp }
-//      call.answer    { type, to: userId, sdp }
-//      call.candidate { type, to: userId, candidate }
-//    いずれも「特定の相手に届ける」必要があるため、宛先 to を持つ。
-//    宛先つきの転送は call.invite で実装済み（ws-server の socketsOf）。そのまま使える。
+// 済 段階1: シグナリングの種別と転送（call.offer / call.answer / call.candidate / call.hangup）
+//      型は上に定義済み。ws-server は宛先を見て転送するだけで、中身（sdp）は解釈しない。
+//      P2Pメッシュを想定している（6人程度までなら SFU は不要）。
+// 済 段階2: 通話の状態と表示（通話中かどうか・相手・切る操作・他の端末の呼びかけを閉じる）
+//      開始のきっかけは call.respond の answer==="accept"。
+//      **承認した側（callee）が offer を作る**形にすれば、呼びかけた側は待つだけで済む。
+//      画面側は role（caller / callee）を持っているので、段階3はそれを見て分岐すればよい。
+//      call.handled は段階2で足した（自分の他の端末に応答済みを配る）。
+// 未 段階3: 音声そのもの（RTCPeerConnection・マイク・offer/answer の作成）
+// 未 段階4: TURN の資格情報を配る経路
+// 未 段階5: 繋がらなかったときの扱い
+// 未 段階6: 停止と再接続への対応
+// 未 段階7: 検証
 //
-// 2) 開始のきっかけは call.respond の answer==="accept" にする。
-//    承認した側が offer を作る形にすれば、呼びかけた側は待つだけで済む。
-//
-// 3) VIEWER_ALLOWED は "call." で名前空間ごと許可済みのため、変更は不要。
+// VIEWER_ALLOWED は "call." で名前空間ごと許可済みのため、種別を足しても変更は不要。
 //
 // 4) メディアは Vercel も Railway も通らない（P2P）。TURN が要る場合のみ外部（Cloudflare 等）を使う。
 //    シグナリングは TCP なので、今の WebSocket サーバーにそのまま相乗りできる。

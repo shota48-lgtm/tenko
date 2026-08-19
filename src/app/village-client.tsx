@@ -152,6 +152,13 @@ export default function VillagePage({
   const [incoming, setIncoming] = useState<Incoming | null>(null);
   const [callNotice, setCallNotice] = useState<string | null>(null);
   const [answered, setAnswered] = useState<{ id: number; text: string } | null>(null);
+  // いまの通話（段階2）。**音はまだ出ない。**状態と表示だけを持つ。
+  //   peerId : 相手の利用者ID。名前はここに持たない（表示のたびにDBの表示名で引く）
+  //   role   : 自分が呼びかけた側か、受けた側か。段階3で「どちらが offer を作るか」に使う
+  // 通話していないときは null。1件しか持たない（同時に2人とは話さない）
+  const [call, setCall] = useState<{ peerId: number; role: "caller" | "callee" } | null>(null);
+  // いま通話中なので呼びかけを受けなかった、という知らせ。黙って捨てると着信に気づけない
+  const [missed, setMissed] = useState<number | null>(null);
   // 集中中の相手に呼びかける前の確認
   const [confirmCall, setConfirmCall] = useState<number | null>(null);
   // 村の拡大率。"fit" は画面に全体が入る大きさ、"close" は2倍（スクロールする）
@@ -205,6 +212,13 @@ export default function VillagePage({
   // 自分のアバターは押しても必ず移動扱いになり、メニューが一生出ない（実機で確認）
   const dragRef = useRef<{ dx: number; dy: number; sx: number; sy: number; moved: boolean } | null>(null);
   const lastSentRef = useRef(0);
+
+  // WebSocket の受信の中から「いま通話中か」を見るための控え。
+  // 受信の登録は繋ぎ直しのときしか作り直さないため、state を直接見ると古い値が残る
+  const callRef = useRef<{ peerId: number; role: "caller" | "callee" } | null>(null);
+  // 名前を引きに行った利用者ID。同じIDで何度も取りに行かないために覚える
+  const triedNamesRef = useRef<Set<number>>(new Set());
+  useEffect(() => { callRef.current = call; }, [call]);
 
   useEffect(() => { myStateRef.current = myState; }, [myState]);
   useEffect(() => { talkRef.current = talk; }, [talk]);
@@ -262,6 +276,22 @@ export default function VillagePage({
     } catch { /* 取れなくても村は描く */ }
   }, [noteSessionLost]);
 
+  // 利用者の一覧（表示名を引く元）。
+  //
+  // **開いたときの1回だけでは足りない。**
+  // 画面を開いた後に追加された利用者は一覧に入らず、その人の名前が引けないまま残る。
+  // 名前が引けないと nameOf が「利用者58」のようにIDを出す。
+  // 実際にそうなった（利用者を1人足した後、開いたままの画面が 56人の一覧を持ち続けた）。
+  // そこで、知らない利用者が現れたときに取り直せるよう、関数として切り出す
+  const loadUsers = useCallback(async () => {
+    try {
+      const res = await fetch("/api/users");
+      if (!res.ok) return;
+      const d = await res.json();
+      setUsers(d.users ?? []);
+    } catch { /* 取れなくても村は描く */ }
+  }, []);
+
   const loadNotes = useCallback(async () => {
     try {
       const res = await fetch("/api/notes");
@@ -284,7 +314,7 @@ export default function VillagePage({
       }
       setDebug(isDebug());
       // 名前と吹き出しは村の絵の一部なので、ログインしていなくても読む
-      void fetch("/api/users").then((r) => r.json()).then((d) => setUsers(d.users ?? [])).catch(() => {});
+      void loadUsers();
       void loadNotes();
       // ここから下は自分の情報。ログインしている人だけが叩く。
       // 叩いても 401 が返るだけだが、無駄な要求を出さない
@@ -304,7 +334,29 @@ export default function VillagePage({
         .catch(() => { /* 取れなくても村は描く */ });
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes, loadVillage, loadAnns, router, isGuest]);
+  }, [loadNotes, loadVillage, loadAnns, loadUsers, router, isGuest]);
+
+  // 名前の分からない利用者が現れたら、一覧を取り直す。
+  //
+  // 対象は「村にいる人」「通話の相手」「呼びかけてきた人」。
+  // **一度試したIDは覚えておき、二度は取りに行かない。**
+  // 覚えないと、本当に一覧に無いID（例: 消された利用者）が村に残っている間、
+  // 30秒ごとに取り直し続けることになる。
+  // 未ログインの人は対象外。名前が配られないのは仕様で、「メンバー」と出るのが正しい
+  useEffect(() => {
+    if (isGuest) return;
+    const known = new Set(users.map((u) => u.id));
+    const wanted = [
+      ...people.map((p) => Number(p.id)),
+      ...(call ? [call.peerId] : []),
+      ...(incoming ? [incoming.id] : []),
+    ];
+    const missing = wanted.filter((id) => Number.isInteger(id) && id > 0
+      && !known.has(id) && !triedNamesRef.current.has(id));
+    if (missing.length === 0) return;
+    for (const id of missing) triedNamesRef.current.add(id);
+    void loadUsers();
+  }, [users, people, call, incoming, isGuest, loadUsers]);
 
   // WebSocket。在席・位置・呼びかけを配る。
   //
@@ -389,8 +441,22 @@ export default function VillagePage({
             // 満員・不正な座標など。押した本人にだけ返る
             setDenied(String(d.reason ?? "移動できませんでした"));
           } else if (d.type === "call.incoming") {
+            // 通話中は新しい呼びかけを受けない（段階2）。
+            // 受けると、いま話している相手との通話をどうするかを決める必要が出る。
+            // **相手に「通話中です」と伝える手段が既存に無い**ため、呼びかけた側からは
+            // 返事が来ないだけに見える。受けた側には、後から気づけるよう知らせを出す
+            if (callRef.current) { setMissed(Number(d.from?.id)); return; }
             // 名前は受け取らない。IDだけを持ち、表示のときにDBの表示名で引く
             setIncoming({ id: Number(d.from?.id), knewFocus: d.knewFocus });
+          } else if (d.type === "call.handled") {
+            // 自分の別の端末が返事をした（段階2-D）。この端末の呼びかけの表示を閉じる。
+            // 二重に応答すると、相手には2回返事が届く
+            setIncoming(null);
+            setCallNotice("他の端末で応答しました");
+          } else if (d.type === "call.hangup") {
+            // 相手が切った。自分の状態も解く
+            setCall(null);
+            setCallNotice("通話が終わりました");
           } else if (d.type === "call.sent") {
             setCallNotice("呼びかけました。相手の返事を待っています");
           } else if (d.type === "call.denied") {
@@ -401,6 +467,9 @@ export default function VillagePage({
                 : "「いまは難しい」と返事がありました";
             // ここも名前はDBの表示名で引く（届いた値をそのまま出さない）
             setAnswered({ id: Number(d.from?.id), text: a });
+            // 「いま話せます」なら通話に入る（段階2）。呼びかけた側はここが入口。
+            // 音はまだ出ない。段階3で、この時点から接続の交渉を始める
+            if (d.answer === "accept") setCall({ peerId: Number(d.from?.id), role: "caller" });
           } else if (d.type === "auth.expired" || d.type === "auth.rejected") {
             // セッションが無効になった／券が通らなかった。
             //
@@ -469,6 +538,12 @@ export default function VillagePage({
     const t = setTimeout(() => setAnswered(null), 6000);
     return () => clearTimeout(t);
   }, [answered]);
+  // 受けられなかった呼びかけの知らせも、他の知らせと同じく数秒で消す
+  useEffect(() => {
+    if (missed == null) return;
+    const t = setTimeout(() => setMissed(null), 6000);
+    return () => clearTimeout(t);
+  }, [missed]);
 
   // 自動離席。away にするだけで、idle へは自動で戻さない
   useEffect(() => {
@@ -958,6 +1033,30 @@ export default function VillagePage({
   // 相手には「集中中と分かったうえで呼びかけている」ことが伝わり、断りやすくしてある。
   //
   // 確認はブラウザの confirm を使わない。画面が止まるうえ、村の見た目から浮くため
+  // 通話を切る（段階2）。
+  // 自分の状態を先に解いてから相手に知らせる。送れなかった場合でも、
+  // 自分の画面が「通話中」のまま残らないようにするため
+  const hangUp = useCallback(() => {
+    const peer = callRef.current?.peerId;
+    setCall(null);
+    if (peer != null) send({ type: "call.hangup", to: peer });
+  }, [send]);
+
+  // 呼びかけへの返事。
+  //
+  // **自分の他の端末にも知らせる（段階2-D）。**
+  //   呼びかけは相手の全端末に届くため、1台で応答しても他の端末には呼びかけが出たままになる。
+  //   ws-server は call.respond を「呼びかけた側」にしか返さないので、
+  //   自分の他の接続へ配ってもらうために call.handled を別に送る。
+  //   宛先は書かない（サーバーが接続から決めた自分の他の接続にだけ配る）
+  const respondCall = useCallback((peerId: number, answer: "accept" | "later" | "decline") => {
+    send({ type: "call.respond", to: peerId, answer });
+    send({ type: "call.handled", answer });
+    setIncoming(null);
+    // 受けた側はここで通話に入る。呼びかけた側は call.answered を受けて入る
+    if (answer === "accept") setCall({ peerId, role: "callee" });
+  }, [send]);
+
   const callTo = (id: number, forced = false) => {
     const target = people.find((p) => Number(p.id) === id);
     const focus = (target?.talk ?? "ok") === "focus";
@@ -1448,6 +1547,8 @@ export default function VillagePage({
             notes={notes}
             nameOf={nameOf}
             monthly={monthly}
+            call={call}
+            onHangUp={hangUp}
           />
         )}
 
@@ -1492,9 +1593,17 @@ export default function VillagePage({
             {IDLE_MINUTES}分操作がないため離席にしました
           </span>
         )}
+        {/* 通話中の表示はここには置かない。サイドパネルの一番上に移した。
+            この帯は数秒で消える知らせの場所で、切るまで出し続けるものとは性質が違うため */}
         {callNotice && (
           <span className="border border-[var(--tk-ink)] px-2 py-0.5" style={{ background: "var(--tk-paper)" }} role="status">
             {callNotice}
+          </span>
+        )}
+        {/* 通話中に受けられなかった呼びかけ。相手には伝わっていないため、こちらから折り返す */}
+        {missed != null && (
+          <span className="border border-[var(--tk-ink)] px-2 py-0.5" style={{ background: "var(--tk-paper)" }} role="status">
+            通話中のため、{nameOf(missed)} からの呼びかけを受けませんでした
           </span>
         )}
         {answered && (
@@ -1583,23 +1692,23 @@ export default function VillagePage({
               </p>
             )}
             <p className="mt-2 text-xs" style={{ color: "var(--tk-ink-soft)" }}>
-              返事をしても通話は始まりません（通話は次の段階で作ります）
+              「いま話せます」を押すと通話中になります（音はまだ出ません。次の段階で作ります）
             </p>
             <div className="mt-3 flex gap-2">
               <button
-                onClick={() => { send({ type: "call.respond", to: incoming.id, answer: "accept" }); setIncoming(null); }}
+                onClick={() => respondCall(incoming.id, "accept")}
                 className="tk-btn flex-1 justify-center"
               >
                 いま話せます
               </button>
               <button
-                onClick={() => { send({ type: "call.respond", to: incoming.id, answer: "later" }); setIncoming(null); }}
+                onClick={() => respondCall(incoming.id, "later")}
                 className="tk-btn tk-btn-quiet flex-1 justify-center"
               >
                 あとで
               </button>
               <button
-                onClick={() => { send({ type: "call.respond", to: incoming.id, answer: "decline" }); setIncoming(null); }}
+                onClick={() => respondCall(incoming.id, "decline")}
                 className="tk-btn tk-btn-quiet flex-1 justify-center"
               >
                 いまは難しい

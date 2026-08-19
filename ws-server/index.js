@@ -669,6 +669,23 @@ wss.on("connection", (ws, req) => {
       if (!Number.isInteger(to) || to <= 0 || to === from.id) return;
       const payload = JSON.stringify({ type: "call.hangup", from: { id: from.id } });
       for (const t of socketsOf(to)) t.send(payload);
+
+    // ---- 自分の他の端末に「応答済み」を配る（段階2-D）----
+    //
+    // 呼びかけは相手の**全端末**に届く（call.invite）。1台で応答しても、
+    // 他の端末には呼びかけが出たままになる。call.respond は呼びかけた側にしか返らないため、
+    // 自分の他の接続へ配る経路をここに足す。
+    //
+    // **宛先を受け取らない。** 配る先は「この接続の人の、他の接続」に限る。
+    //   msg.to を読むと、他人の端末の表示を消せることになる。
+    //   発信元を接続から決める方針（移動・呼びかけと同じ）を、宛先の側にも当てている。
+    // 送っている接続自身には返さない（既に自分で閉じているため）
+    } else if (msg.type === "call.handled") {
+      const from = presence.get(ws);
+      if (!from) return;
+      const answer = msg.answer === "accept" ? "accept" : msg.answer === "later" ? "later" : "decline";
+      const payload = JSON.stringify({ type: "call.handled", from: { id: from.id }, answer });
+      for (const t of socketsOf(from.id)) if (t !== ws) t.send(payload);
     }
   });
 
