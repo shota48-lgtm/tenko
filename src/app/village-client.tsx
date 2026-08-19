@@ -216,6 +216,8 @@ export default function VillagePage({
   // WebSocket の受信の中から「いま通話中か」を見るための控え。
   // 受信の登録は繋ぎ直しのときしか作り直さないため、state を直接見ると古い値が残る
   const callRef = useRef<{ peerId: number; role: "caller" | "callee" } | null>(null);
+  // 名前を引きに行った利用者ID。同じIDで何度も取りに行かないために覚える
+  const triedNamesRef = useRef<Set<number>>(new Set());
   useEffect(() => { callRef.current = call; }, [call]);
 
   useEffect(() => { myStateRef.current = myState; }, [myState]);
@@ -274,6 +276,22 @@ export default function VillagePage({
     } catch { /* 取れなくても村は描く */ }
   }, [noteSessionLost]);
 
+  // 利用者の一覧（表示名を引く元）。
+  //
+  // **開いたときの1回だけでは足りない。**
+  // 画面を開いた後に追加された利用者は一覧に入らず、その人の名前が引けないまま残る。
+  // 名前が引けないと nameOf が「利用者58」のようにIDを出す。
+  // 実際にそうなった（利用者を1人足した後、開いたままの画面が 56人の一覧を持ち続けた）。
+  // そこで、知らない利用者が現れたときに取り直せるよう、関数として切り出す
+  const loadUsers = useCallback(async () => {
+    try {
+      const res = await fetch("/api/users");
+      if (!res.ok) return;
+      const d = await res.json();
+      setUsers(d.users ?? []);
+    } catch { /* 取れなくても村は描く */ }
+  }, []);
+
   const loadNotes = useCallback(async () => {
     try {
       const res = await fetch("/api/notes");
@@ -296,7 +314,7 @@ export default function VillagePage({
       }
       setDebug(isDebug());
       // 名前と吹き出しは村の絵の一部なので、ログインしていなくても読む
-      void fetch("/api/users").then((r) => r.json()).then((d) => setUsers(d.users ?? [])).catch(() => {});
+      void loadUsers();
       void loadNotes();
       // ここから下は自分の情報。ログインしている人だけが叩く。
       // 叩いても 401 が返るだけだが、無駄な要求を出さない
@@ -316,7 +334,29 @@ export default function VillagePage({
         .catch(() => { /* 取れなくても村は描く */ });
     }, 0);
     return () => clearTimeout(t);
-  }, [loadNotes, loadVillage, loadAnns, router, isGuest]);
+  }, [loadNotes, loadVillage, loadAnns, loadUsers, router, isGuest]);
+
+  // 名前の分からない利用者が現れたら、一覧を取り直す。
+  //
+  // 対象は「村にいる人」「通話の相手」「呼びかけてきた人」。
+  // **一度試したIDは覚えておき、二度は取りに行かない。**
+  // 覚えないと、本当に一覧に無いID（例: 消された利用者）が村に残っている間、
+  // 30秒ごとに取り直し続けることになる。
+  // 未ログインの人は対象外。名前が配られないのは仕様で、「メンバー」と出るのが正しい
+  useEffect(() => {
+    if (isGuest) return;
+    const known = new Set(users.map((u) => u.id));
+    const wanted = [
+      ...people.map((p) => Number(p.id)),
+      ...(call ? [call.peerId] : []),
+      ...(incoming ? [incoming.id] : []),
+    ];
+    const missing = wanted.filter((id) => Number.isInteger(id) && id > 0
+      && !known.has(id) && !triedNamesRef.current.has(id));
+    if (missing.length === 0) return;
+    for (const id of missing) triedNamesRef.current.add(id);
+    void loadUsers();
+  }, [users, people, call, incoming, isGuest, loadUsers]);
 
   // WebSocket。在席・位置・呼びかけを配る。
   //
@@ -1507,6 +1547,8 @@ export default function VillagePage({
             notes={notes}
             nameOf={nameOf}
             monthly={monthly}
+            call={call}
+            onHangUp={hangUp}
           />
         )}
 
@@ -1551,20 +1593,8 @@ export default function VillagePage({
             {IDLE_MINUTES}分操作がないため離席にしました
           </span>
         )}
-        {/* 通話中（段階2）。呼びかけの知らせと同じ帯に置く。
-            流れて消える知らせと違い、切るまで出したままにする。
-            名前はDBの表示名で引く（presence の名前は自己申告で騙れるため使わない）。
-            意匠は既存に合わせる: 角丸なし・影なし・アニメーションなし */}
-        {call && (
-          <span
-            className="flex items-center gap-2 border border-[var(--tk-ink)] px-2 py-0.5 font-bold"
-            style={{ background: "var(--tk-straw)", color: "var(--tk-ink)" }}
-            role="status"
-          >
-            通話中: {nameOf(call.peerId)}
-            <button onClick={hangUp} className="tk-btn px-2 py-0 text-[11px]">切る</button>
-          </span>
-        )}
+        {/* 通話中の表示はここには置かない。サイドパネルの一番上に移した。
+            この帯は数秒で消える知らせの場所で、切るまで出し続けるものとは性質が違うため */}
         {callNotice && (
           <span className="border border-[var(--tk-ink)] px-2 py-0.5" style={{ background: "var(--tk-paper)" }} role="status">
             {callNotice}

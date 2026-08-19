@@ -49,13 +49,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function SidePanel({
-  people, rooms, counts, notes, nameOf, monthly,
+  people, rooms, counts, notes, nameOf, monthly, call, onHangUp,
 }: {
   people: Presence[];
   rooms: Room[];
   counts: RoomCounts;
   notes: NoteMap;
   nameOf: (id: number) => string;
+  /** いまの通話（段階2）。通話していないときは null。null ならパネルごと出さない */
+  call?: { peerId: number } | null;
+  onHangUp?: () => void;
   // 自分の今月の勤怠。**未ログインのときと、取れなかったときは null。**
   // null ならパネルごと出さない（空の枠も、断りの文も出さない）
   monthly?: MonthlyResult["total"] | null;
@@ -77,6 +80,20 @@ export default function SidePanel({
       style={{ width: SIDE_PANEL_W }}
       aria-label="村の様子"
     >
+      {/* 通話中（段階2の修正で、画面下端の帯からここへ移した）。
+          下端は知らせ（呼びかけました・返事がありました）が流れる場所で、
+          切るまで出し続けるものと混ざって読みにくかった。
+          通話していないときはパネルごと出さない。空の枠も「通話していません」も出さない。
+          相手の名前はDBの表示名（nameOf）で引く。自己申告の名前は使わない */}
+      {call && (
+        <Section title="通話中">
+          <div className="flex items-center gap-2 px-3 py-2">
+            <span className="truncate text-xs font-bold">{nameOf(call.peerId)}</span>
+            <button onClick={onHangUp} className="tk-btn ml-auto shrink-0 px-2 py-0 text-[11px]">切る</button>
+          </div>
+        </Section>
+      )}
+
       <Section title="いまの村">
         <p className="px-3 py-2 text-xs whitespace-nowrap">
           {tally.map((t, i) => (
