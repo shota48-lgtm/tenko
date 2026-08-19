@@ -28,6 +28,7 @@ import {
 import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/village/demo-drift";
 import SidePanel, { SIDE_PANEL_W } from "./side-panel";
 import type { MonthlyResult } from "@/lib/monthly-format";
+import { startVoice, type VoiceCall } from "@/lib/webrtc";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 村の拡大率。
@@ -159,6 +160,9 @@ export default function VillagePage({
   const [call, setCall] = useState<{ peerId: number; role: "caller" | "callee" } | null>(null);
   // いま通話中なので呼びかけを受けなかった、という知らせ。黙って捨てると着信に気づけない
   const [missed, setMissed] = useState<number | null>(null);
+  // 自分の音声を止めているか。**通話ごとに false から始める**（前の通話の状態を持ち越さない）。
+  // 相手には送らない（段階1のメッセージの型を増やさない）。相手からは「無音」に聞こえる
+  const [muted, setMuted] = useState(false);
   // 集中中の相手に呼びかける前の確認
   const [confirmCall, setConfirmCall] = useState<number | null>(null);
   // 村の拡大率。"fit" は画面に全体が入る大きさ、"close" は2倍（スクロールする）
@@ -218,6 +222,18 @@ export default function VillagePage({
   const callRef = useRef<{ peerId: number; role: "caller" | "callee" } | null>(null);
   // 名前を引きに行った利用者ID。同じIDで何度も取りに行かないために覚える
   const triedNamesRef = useRef<Set<number>>(new Set());
+  // いま呼びかけている相手。**この中の人からの「いま話せます」でだけ通話に入る。**
+  // 呼びかけていない相手の承認や、自分の別の接続からの返事で通話に入らないための控え
+  const invitedRef = useRef<Set<number>>(new Set());
+  // 音声の接続（段階3）。**マイクを掴んでいるのはこの中だけ。**
+  // 通話していない間は必ず null にする
+  const voiceRef = useRef<VoiceCall | null>(null);
+  // 接続ができる前に届いた合図を溜める場所。
+  // 承認した側は即座に offer を送るが、呼びかけた側はマイクの許可を待っている間に
+  // それを受け取ることがある。捨てると通話が始まらない
+  const pendingSignalsRef = useRef<{ kind: "offer" | "answer" | "candidate"; value: unknown }[]>([]);
+  // 相手の声を鳴らす要素。canvas には音を出せないので DOM に置く
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => { callRef.current = call; }, [call]);
 
   useEffect(() => { myStateRef.current = myState; }, [myState]);
@@ -240,6 +256,43 @@ export default function VillagePage({
     if (isGuest) return false;
     return send({ type: "presence.set", user: userRef.current, state, roomId: null, talk: talkStatus });
   }, [send, isGuest]);
+
+  // 音声の接続を閉じる（段階3）。**マイクを止めるのはここ1か所に集める。**
+  // 切ったとき・相手が切ったとき・画面を離れるときの3つから呼ぶ
+  const closeVoice = useCallback(() => {
+    voiceRef.current?.close();
+    voiceRef.current = null;
+    pendingSignalsRef.current = [];
+    // 次の通話はミュートしていない状態から始める
+    setMuted(false);
+    const a = audioRef.current;
+    if (a) { a.pause(); a.srcObject = null; }
+  }, []);
+
+  // ミュートの切り替え。**画面側からトラックを直接触らない**（webrtc.ts の VoiceCall を通す）
+  const toggleMute = useCallback(() => {
+    const v = voiceRef.current;
+    if (!v) return;
+    setMuted((prev) => {
+      const next = !prev;
+      v.setMuted(next);
+      return next;
+    });
+  }, []);
+
+  // 届いた合図をブラウザに渡す。**中身は見ない。**
+  const applySignal = useCallback(async (kind: "offer" | "answer" | "candidate", value: unknown) => {
+    const v = voiceRef.current;
+    if (!v) return;
+    try {
+      if (kind === "offer") await v.handleOffer(String(value ?? ""));
+      else if (kind === "answer") await v.handleAnswer(String(value ?? ""));
+      else await v.addCandidate(value);
+    } catch (e) {
+      // 段階3では画面に出さない。出し方は段階5で決める
+      console.warn("[voice] 合図を適用できなかった: " + kind, e);
+    }
+  }, []);
 
   // セッションが切れたとき。
   //
@@ -454,22 +507,48 @@ export default function VillagePage({
             setIncoming(null);
             setCallNotice("他の端末で応答しました");
           } else if (d.type === "call.hangup") {
-            // 相手が切った。自分の状態も解く
+            // 相手が切った。音声の接続とマイクを先に閉じ、そのあと状態を解く（段階3）
+            closeVoice();
             setCall(null);
             setCallNotice("通話が終わりました");
+          } else if (d.type === "call.offer" || d.type === "call.answer" || d.type === "call.candidate") {
+            // 音声を繋ぐための合図（段階3）。**中身は解釈せず、そのままブラウザに渡す。**
+            // 接続の用意ができていなければ溜めておく（マイクの許可を待っている間に届くため）
+            const kind = d.type === "call.offer" ? "offer" : d.type === "call.answer" ? "answer" : "candidate";
+            const value = kind === "candidate" ? d.candidate : d.sdp;
+            if (voiceRef.current) void applySignal(kind, value);
+            else pendingSignalsRef.current.push({ kind, value });
           } else if (d.type === "call.sent") {
             setCallNotice("呼びかけました。相手の返事を待っています");
           } else if (d.type === "call.denied") {
             setCallNotice(String(d.reason ?? "呼びかけられませんでした"));
           } else if (d.type === "call.answered") {
+            const fromId = Number(d.from?.id);
+            // **自分自身からの返事はあり得ない。**
+            // ws-server の call.respond は、call.invite と違って宛先が自分でも通す
+            // （to === from.id を弾いていない）。そのため自分の別の接続が返事を送ると、
+            // 自分を相手とする「返事」が自分に届く。これを通すと
+            // 通話中の相手が自分になり、両方の画面に同じ名前が出る（段階3の不具合）
+            if (!Number.isInteger(fromId) || fromId <= 0 || fromId === userRef.current.id) {
+              console.warn("[call] 自分自身からの返事を捨てた: id=" + fromId);
+              return;
+            }
             const a = d.answer === "accept" ? "「いま話せます」と返事がありました"
               : d.answer === "later" ? "「あとで」と返事がありました"
                 : "「いまは難しい」と返事がありました";
             // ここも名前はDBの表示名で引く（届いた値をそのまま出さない）
-            setAnswered({ id: Number(d.from?.id), text: a });
+            setAnswered({ id: fromId, text: a });
             // 「いま話せます」なら通話に入る（段階2）。呼びかけた側はここが入口。
-            // 音はまだ出ない。段階3で、この時点から接続の交渉を始める
-            if (d.answer === "accept") setCall({ peerId: Number(d.from?.id), role: "caller" });
+            // **呼びかけた相手からの返事だけを受ける。**
+            // 呼びかけていない相手の「承認」で通話に入ると、意図しない相手と繋がる
+            if (d.answer === "accept") {
+              if (!invitedRef.current.has(fromId)) {
+                console.warn("[call] 呼びかけていない相手からの承認を捨てた: id=" + fromId);
+                return;
+              }
+              invitedRef.current.clear();
+              setCall({ peerId: fromId, role: "caller" });
+            }
           } else if (d.type === "auth.expired" || d.type === "auth.rejected") {
             // セッションが無効になった／券が通らなかった。
             //
@@ -1038,9 +1117,50 @@ export default function VillagePage({
   // 自分の画面が「通話中」のまま残らないようにするため
   const hangUp = useCallback(() => {
     const peer = callRef.current?.peerId;
+    // 音声とマイクを先に止める。相手に知らせる前に止めることで、
+    // 送信に失敗しても自分のマイクが掴まれたままにならない（段階3）
+    closeVoice();
     setCall(null);
     if (peer != null) send({ type: "call.hangup", to: peer });
-  }, [send]);
+  }, [send, closeVoice]);
+
+  // 通話の状態が立ったら音声を繋ぐ。**マイクを取るのはここだけ**（段階3）。
+  //
+  // 承認した側（callee）が接続情報を作って送り、呼びかけた側（caller）は待つ
+  // （ws-messages.ts の設計メモ 2 のとおり）。
+  // 許可を待っている間に相手の合図が届くことがあるので、溜めてあった分を後から流す。
+  // 通話が終われば（call が null になれば）閉じる。マイクもここで止まる
+  useEffect(() => {
+    if (!call) { closeVoice(); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const v = await startVoice({
+          peerId: call.peerId,
+          role: call.role,
+          send: (m) => { send(m); },
+          onRemoteStream: (stream) => {
+            const a = audioRef.current;
+            if (!a) return;
+            a.srcObject = stream;
+            void a.play().catch((e) => console.warn("[voice] 相手の声を鳴らせなかった", e));
+          },
+        });
+        if (cancelled) { v.close(); return; }
+        voiceRef.current = v;
+        const queued = pendingSignalsRef.current;
+        pendingSignalsRef.current = [];
+        for (const q of queued) await applySignal(q.kind, q.value);
+      } catch (e) {
+        // マイクが取れない・断られた。段階3では画面に出さず、記録だけ残す（段階5で扱う）
+        console.warn("[voice] 通話を始められなかった（マイクの許可が下りなかった可能性）", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [call, send, closeVoice, applySignal]);
+
+  // 画面を離れるとき。**マイクを掴んだままにしない**
+  useEffect(() => () => closeVoice(), [closeVoice]);
 
   // 呼びかけへの返事。
   //
@@ -1050,6 +1170,8 @@ export default function VillagePage({
   //   自分の他の接続へ配ってもらうために call.handled を別に送る。
   //   宛先は書かない（サーバーが接続から決めた自分の他の接続にだけ配る）
   const respondCall = useCallback((peerId: number, answer: "accept" | "later" | "decline") => {
+    // 自分自身へは返事をしない（自分と通話している状態になるため）
+    if (peerId === userRef.current.id) { setIncoming(null); return; }
     send({ type: "call.respond", to: peerId, answer });
     send({ type: "call.handled", answer });
     setIncoming(null);
@@ -1061,6 +1183,8 @@ export default function VillagePage({
     const target = people.find((p) => Number(p.id) === id);
     const focus = (target?.talk ?? "ok") === "focus";
     if (focus && !forced) { setConfirmCall(id); return; }
+    // 呼びかけた相手を覚える。返事が来たとき、この相手からのものかを確かめる
+    invitedRef.current.add(id);
     send({ type: "call.invite", to: id, knewFocus: focus });
     setConfirmCall(null);
     setPicked(null);
@@ -1549,6 +1673,8 @@ export default function VillagePage({
             monthly={monthly}
             call={call}
             onHangUp={hangUp}
+            muted={muted}
+            onToggleMute={toggleMute}
           />
         )}
 
@@ -1585,6 +1711,12 @@ export default function VillagePage({
           </aside>
         )}
       </div>
+
+      {/* 相手の声（段階3）。見えるものは何も出さない。
+          canvas からは音を出せないため、DOM にこの要素を1つ置く。
+          srcObject を入れるのは webrtc.ts から受け取った時点だけで、
+          通話していない間は空にしてある */}
+      <audio ref={audioRef} autoPlay playsInline className="hidden" />
 
       {/* 画面下部。説明文は置かない（説明が要るUIは直す側）*/}
       <nav className="tk-head fixed inset-x-0 bottom-0 flex items-center gap-2 border-t px-4 py-1.5 text-xs">

@@ -49,7 +49,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function SidePanel({
-  people, rooms, counts, notes, nameOf, monthly, call, onHangUp,
+  people, rooms, counts, notes, nameOf, monthly, call, onHangUp, muted, onToggleMute,
 }: {
   people: Presence[];
   rooms: Room[];
@@ -59,6 +59,9 @@ export default function SidePanel({
   /** いまの通話（段階2）。通話していないときは null。null ならパネルごと出さない */
   call?: { peerId: number } | null;
   onHangUp?: () => void;
+  /** 自分の音声を止めているか（段階3）。状態を持つのは画面側で、ここは出すだけ */
+  muted?: boolean;
+  onToggleMute?: () => void;
   // 自分の今月の勤怠。**未ログインのときと、取れなかったときは null。**
   // null ならパネルごと出さない（空の枠も、断りの文も出さない）
   monthly?: MonthlyResult["total"] | null;
@@ -89,7 +92,20 @@ export default function SidePanel({
         <Section title="通話中">
           <div className="flex items-center gap-2 px-3 py-2">
             <span className="truncate text-xs font-bold">{nameOf(call.peerId)}</span>
-            <button onClick={onHangUp} className="tk-btn ml-auto shrink-0 px-2 py-0 text-[11px]">切る</button>
+            {/* ボタンの形・余白・角丸は「切る」と同じ（tk-btn / px-2 py-0 / 角丸なし）。
+                ミュート中だけ背景を変えて、止まっていることが分かるようにする。
+                ミュートは相手に伝えない（段階1のメッセージの型を増やさないため） */}
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              <button
+                onClick={onToggleMute}
+                className="tk-btn px-2 py-0 text-[11px]"
+                style={muted ? { background: "var(--tk-straw)", color: "var(--tk-ink)" } : undefined}
+                aria-pressed={muted === true}
+              >
+                {muted ? "ミュート解除" : "ミュート"}
+              </button>
+              <button onClick={onHangUp} className="tk-btn px-2 py-0 text-[11px]">切る</button>
+            </span>
           </div>
         </Section>
       )}
