@@ -44,7 +44,31 @@ export type PresenceMove = {
 export type CallInvite = { type: "call.invite"; to: number; knewFocus?: boolean };
 export type CallRespond = { type: "call.respond"; to: number; answer: "accept" | "later" | "decline" };
 
-export type ClientToServer = PresenceSet | PresenceSync | PresenceMove | CallInvite | CallRespond;
+/**
+ * 音声通話のシグナリング（段階1）。呼びかけ→承認のあとに使う。
+ *
+ * 宛先の表し方は call.invite / call.respond と同じ `to: number`（利用者ID）にする。
+ * **発信元は書かない。** サーバーが接続から決めるため、書いてもなりすませない
+ * （ws-server は msg の利用者IDを読まない）。
+ *
+ * 中身（sdp / candidate）は**運ぶだけ**で、型でも解釈も検証もしない。
+ * 解釈すると、ブラウザの実装が変わるたびにサーバー側を直すことになる。
+ * ws-server も同じ方針で、宛先を見て転送するだけ（中身を見ない）。
+ */
+export type CallOffer = { type: "call.offer"; to: number; sdp: string };
+export type CallAnswer = { type: "call.answer"; to: number; sdp: string };
+/** 追加の経路の候補。RTCIceCandidate をそのまま載せるため、形は決めない */
+export type CallCandidate = { type: "call.candidate"; to: number; candidate: unknown };
+/**
+ * 通話の終了。
+ * 109行以降の設計メモには無い種別で、CANON（段階1）の指示で足した。
+ * 終わりを伝える相手が要るため、他の3種と同じく宛先 to を持つ
+ */
+export type CallHangup = { type: "call.hangup"; to: number };
+
+export type ClientToServer =
+  | PresenceSet | PresenceSync | PresenceMove | CallInvite | CallRespond
+  | CallOffer | CallAnswer | CallCandidate | CallHangup;
 
 // ---- サーバー -> 画面 ----
 
@@ -93,9 +117,24 @@ export type MessageCreated = {
   message: { id: number | string; room_id: number | string; body: string; user_id: number | string };
 };
 
+/**
+ * シグナリングを相手へ届けたもの（段階1）。
+ *
+ * 種別の文字列は送るときと同じにし、宛先 `to` の代わりに発信元 `from` が入る。
+ * 呼びかけが call.invite → call.incoming と名前を変えるのに対し、こちらは名前を変えない。
+ * ブラウザ側の処理（offer を受けたら answer を返す）が、送った種別と受けた種別を
+ * 同じ名前で扱えるほうが追いやすいため。
+ * from はサーバーが接続から決める。名前は載せない（画面はDBの表示名で引く。既存と同じ）
+ */
+export type CallOfferRelayed = { type: "call.offer"; from: { id: number }; sdp: string };
+export type CallAnswerRelayed = { type: "call.answer"; from: { id: number }; sdp: string };
+export type CallCandidateRelayed = { type: "call.candidate"; from: { id: number }; candidate: unknown };
+export type CallHangupRelayed = { type: "call.hangup"; from: { id: number } };
+
 export type ServerToClient =
   | PresenceList | MessageCreated
-  | PresenceDenied | CallIncoming | CallAnswered | CallDenied | CallSent;
+  | PresenceDenied | CallIncoming | CallAnswered | CallDenied | CallSent
+  | CallOfferRelayed | CallAnswerRelayed | CallCandidateRelayed | CallHangupRelayed;
 
 // ---- 送り手の役割 ----
 //
