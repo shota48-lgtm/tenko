@@ -625,6 +625,50 @@ wss.on("connection", (ws, req) => {
         type: "call.answered", from: { id: from.id }, answer,
       });
       for (const t of socketsOf(to)) t.send(payload);
+
+    // ---- 音声通話のシグナリング（段階1）----
+    //
+    // 4種とも、call.respond と同じ形で「宛先の人にだけ転送する」だけの処理にする。
+    //   - **中身（sdp / candidate）は見ない。** 解釈も検証もしない。
+    //     ブラウザが作った値をそのまま運ぶ。ここで解釈すると、
+    //     ブラウザの実装が変わるたびにこのサーバーを直すことになる
+    //   - 発信元は接続から決める（presence.get(ws)）。msg の利用者IDは読まない。
+    //     移動・呼びかけと同じ方針で、これがなりすませないことの担保になっている
+    //   - VIEWER_ALLOWED は "call." で名前空間ごと許可済みのため、変更していない
+    //
+    // 同じ人が複数の端末で繋いでいる場合、call.invite と同じく全端末へ届く。
+    // どの端末と繋ぐかは段階2で決める。ここでは既存の挙動を変えない
+    } else if (msg.type === "call.offer") {
+      const from = presence.get(ws);
+      if (!from) return;
+      const to = Number(msg.to);
+      if (!Number.isInteger(to) || to <= 0 || to === from.id) return;
+      const payload = JSON.stringify({ type: "call.offer", from: { id: from.id }, sdp: msg.sdp });
+      for (const t of socketsOf(to)) t.send(payload);
+
+    } else if (msg.type === "call.answer") {
+      const from = presence.get(ws);
+      if (!from) return;
+      const to = Number(msg.to);
+      if (!Number.isInteger(to) || to <= 0 || to === from.id) return;
+      const payload = JSON.stringify({ type: "call.answer", from: { id: from.id }, sdp: msg.sdp });
+      for (const t of socketsOf(to)) t.send(payload);
+
+    } else if (msg.type === "call.candidate") {
+      const from = presence.get(ws);
+      if (!from) return;
+      const to = Number(msg.to);
+      if (!Number.isInteger(to) || to <= 0 || to === from.id) return;
+      const payload = JSON.stringify({ type: "call.candidate", from: { id: from.id }, candidate: msg.candidate });
+      for (const t of socketsOf(to)) t.send(payload);
+
+    } else if (msg.type === "call.hangup") {
+      const from = presence.get(ws);
+      if (!from) return;
+      const to = Number(msg.to);
+      if (!Number.isInteger(to) || to <= 0 || to === from.id) return;
+      const payload = JSON.stringify({ type: "call.hangup", from: { id: from.id } });
+      for (const t of socketsOf(to)) t.send(payload);
     }
   });
 
