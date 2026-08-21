@@ -97,6 +97,99 @@ export async function startVoice(opts: {
   const pc = new RTCPeerConnection({ iceServers });
   for (const track of local.getTracks()) pc.addTrack(track, local);
 
+  // ── ここから、切り分けのための記録（段階5の調査） ────────────────────────
+  //
+  // 音が歪むのは実マイクと実スピーカーを通したときだけで、手元では再現しない。
+  // そこで「どの経路で繋がったか」「どれだけ落ちて・揺れて・埋められたか」を
+  // 記録に出し、POが実機で読めるようにする。**画面には出さない**（出し方は段階5で決める）。
+  //
+  // **候補が集まったことを根拠にしない。** 実際に使われている組を統計から引く。
+  // 候補はいくつも集まるが、使われるのはそのうち1組だけである。
+
+  /** 実際に使われている候補の組を、統計から1つ引く。無ければ null */
+  const selectedPair = (s: RTCStatsReport) => {
+    const byId = new Map<string, RTCStats>();
+    s.forEach((r) => byId.set(r.id, r));
+
+    // transport が指している組が正。ここに無い場合だけ、succeeded かつ nominated を拾う
+    let pair: (RTCStats & Record<string, unknown>) | null = null;
+    s.forEach((r) => {
+      const t = r as RTCStats & { selectedCandidatePairId?: string };
+      if (r.type === "transport" && t.selectedCandidatePairId) {
+        pair = (byId.get(t.selectedCandidatePairId) as typeof pair) ?? pair;
+      }
+    });
+    if (!pair) {
+      s.forEach((r) => {
+        const c = r as RTCStats & { selected?: boolean; nominated?: boolean; state?: string };
+        if (r.type === "candidate-pair" && (c.selected || (c.nominated && c.state === "succeeded"))) {
+          pair = r as typeof pair;
+        }
+      });
+    }
+    if (!pair) return null;
+
+    const p = pair as RTCStats & { localCandidateId?: string; remoteCandidateId?: string; currentRoundTripTime?: number };
+    const lc = p.localCandidateId ? (byId.get(p.localCandidateId) as { candidateType?: string } | undefined) : undefined;
+    const rc = p.remoteCandidateId ? (byId.get(p.remoteCandidateId) as { candidateType?: string } | undefined) : undefined;
+    return {
+      localType: lc?.candidateType ?? "不明",
+      remoteType: rc?.candidateType ?? "不明",
+      rtt: typeof p.currentRoundTripTime === "number" ? p.currentRoundTripTime : null,
+    };
+  };
+
+  let routeLogged = false;
+  /** 最後に読めた品質の1行。閉じるときに出す（閉じた後は統計を読めないため先に貯めておく） */
+  let lastQuality: string | null = null;
+  let poller: ReturnType<typeof setInterval> | null = null;
+
+  const ms = (sec: number | null | undefined) =>
+    typeof sec === "number" ? (sec * 1000).toFixed(1) + "ms" : "不明";
+  const pct = (n: number, d: number) => (d > 0 ? ((n / d) * 100).toFixed(2) + "%" : "—");
+
+  const readStats = async () => {
+    if (closed) return;
+    let s: RTCStatsReport;
+    try { s = await pc.getStats(); } catch { return; }
+
+    // 経路は繋がった直後に1回だけ出す。毎秒出すと記録が埋まる
+    const sel = selectedPair(s);
+    if (!routeLogged && sel) {
+      routeLogged = true;
+      console.log("[voice] 経路: " + sel.localType + " / " + sel.remoteType);
+    }
+
+    // 品質は貯め続け、閉じるときに最後の1行を出す
+    let packetsSent = 0, packetsReceived = 0, packetsLost = 0;
+    let jitter: number | null = null, concealed = 0, samples = 0;
+    s.forEach((r) => {
+      const a = r as RTCStats & Record<string, number | string | undefined>;
+      if (r.type === "outbound-rtp" && a.kind === "audio") {
+        packetsSent = Number(a.packetsSent ?? 0);
+      }
+      if (r.type === "inbound-rtp" && a.kind === "audio") {
+        packetsReceived = Number(a.packetsReceived ?? 0);
+        packetsLost = Number(a.packetsLost ?? 0);
+        jitter = typeof a.jitter === "number" ? a.jitter : jitter;
+        concealed = Number(a.concealedSamples ?? 0);
+        samples = Number(a.totalSamplesReceived ?? 0);
+      }
+    });
+    // 届くはずだった数 = 受け取った数 + 失われた数
+    const expected = packetsReceived + packetsLost;
+    lastQuality =
+      "[voice] 品質: 受信で失われた小包 " + packetsLost + "/" + expected + "（" + pct(packetsLost, expected) + "）" +
+      " / 送った小包 " + packetsSent +
+      " / 揺らぎ " + ms(jitter) +
+      " / 往復 " + ms(sel?.rtt) +
+      " / 埋めた標本 " + concealed + "（" + pct(concealed, samples) + "）";
+  };
+
+  // 2秒ごとに読む。閉じる直前の値を持っておくため
+  poller = setInterval(() => { void readStats(); }, 2_000);
+  // ── 記録のための追加はここまで ───────────────────────────────────────
+
   // 相手の接続情報が入る前に届いた候補は、ここに溜めてから入れる。
   // 先に入れると InvalidStateError になり、その候補は捨てられる（経路が1つ減る）
   const pending: RTCIceCandidateInit[] = [];
@@ -122,6 +215,8 @@ export async function startVoice(opts: {
   };
   pc.onconnectionstatechange = () => {
     console.log("[voice] 接続の状態: " + pc.connectionState);
+    // 繋がった時点で経路を出す。2秒の間隔を待たずに読む
+    if (pc.connectionState === "connected") void readStats();
     onState?.(pc.connectionState);
   };
 
@@ -168,6 +263,12 @@ export async function startVoice(opts: {
     },
     close() {
       if (closed) return;
+      // **品質の記録を、閉じる前に出す。** 閉じた後は統計を読めない。
+      // closed を立てる前に出すのは、readStats が closed を見て何もしなくなるため
+      if (lastQuality) console.log(lastQuality);
+      else console.log("[voice] 品質: 記録なし（繋がる前に終わった）");
+      if (poller !== null) { clearInterval(poller); poller = null; }
+
       closed = true;
       // **マイクを先に止める。** 後回しにすると、閉じる途中で失敗したときに掴んだままになる
       for (const track of local.getTracks()) track.stop();
