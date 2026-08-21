@@ -31,6 +31,50 @@
  */
 export const STUN_URLS = ["stun:stun.cloudflare.com:3478"];
 
+/**
+ * 通話が今どうなっているか（段階5）。**画面に出す文言はこれだけで決まる。**
+ *
+ * ここに置く理由:
+ *   接続の状態（RTCPeerConnectionState）を持っているのはこのファイルである。
+ *   画面側で判定を組むと、状態の出どころと判定が離れ、実体と表示がずれても気づけない。
+ *
+ *   connecting : つないでいる最中（new / connecting）
+ *   connected  : つながった
+ *   failed     : **一度も connected にならずに** failed になった
+ *   lost       : connected になった後に disconnected か failed になった
+ */
+export type VoicePhase = "connecting" | "connected" | "failed" | "lost";
+
+/**
+ * 接続の状態が変わったときの、次の段階を返す。
+ *
+ * 「繋がらなかった」と「切れた」は、同じ failed から分かれる。
+ * 分けるのは **一度でも connected になったか** だけなので、それを引数で受け取る。
+ * 判定を1つの関数に閉じてあるので、外から同じ入力を与えれば同じ答えが確かめられる。
+ *
+ * 何も変えるべきでないときは prev をそのまま返す（closed など）。
+ */
+export function nextVoicePhase(
+  prev: VoicePhase,
+  state: RTCPeerConnectionState,
+  everConnected: boolean,
+): VoicePhase {
+  if (state === "connected") return "connected";
+  if (state === "new" || state === "connecting") return "connecting";
+  if (state === "failed") return everConnected ? "lost" : "failed";
+  // 繋がる前の disconnected は途中の状態。まだ「切れた」とは言えない
+  if (state === "disconnected") return everConnected ? "lost" : prev;
+  return prev;
+}
+
+/** 段階ごとに画面へ出す文言。**文言を書くのはここ1か所だけにする。** */
+export function voiceStatusText(phase: VoicePhase): string {
+  if (phase === "connected") return "つながりました";
+  if (phase === "failed") return "相手とつながりませんでした";
+  if (phase === "lost") return "通話が切れました";
+  return "つないでいます";
+}
+
 /** 相手へ送る合図。中身は運ぶだけで、ws-server も解釈しない（段階1） */
 export type SignalSender = (msg:
   | { type: "call.offer"; to: number; sdp: string }
