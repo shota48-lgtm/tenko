@@ -270,14 +270,19 @@ export default function VillagePage({
   }, []);
 
   // ミュートの切り替え。**画面側からトラックを直接触らない**（webrtc.ts の VoiceCall を通す）
+  //
+  // **副作用（v.setMuted）を、状態の更新関数の中で呼ばない。**
+  //   開発時は StrictMode が更新関数を意図的に2回呼ぶため、中に置くと
+  //   マイクの切り替えとログが1回の操作で2回走る（本番では1回。動作の誤りではないが、
+  //   記録が二重に出て切り分けの邪魔になる）。
+  //   いまの状態は画面の state ではなく **VoiceCall に聞く**（isMuted）。
+  //   トラックの enabled が本体で、state はその写しであるため、本体を正とする
   const toggleMute = useCallback(() => {
     const v = voiceRef.current;
     if (!v) return;
-    setMuted((prev) => {
-      const next = !prev;
-      v.setMuted(next);
-      return next;
-    });
+    const next = !v.isMuted();
+    v.setMuted(next);
+    setMuted(next);
   }, []);
 
   // 届いた合図をブラウザに渡す。**中身は見ない。**
@@ -1135,9 +1140,33 @@ export default function VillagePage({
     let cancelled = false;
     void (async () => {
       try {
+        // 中継サーバー（TURN）の使い捨ての合言葉を、**通話を始める直前に**取りに行く（段階4）。
+        //
+        // 開いたときにまとめて取らない理由:
+        //   合言葉には期限がある。画面を開いたまま何時間も置かれると、
+        //   いざ通話するときには切れている。通話1回につき1度取るのが確実で、
+        //   呼び出し回数も通話の回数までにしかならない。
+        //
+        // **取れなくても通話を止めない。** 失敗したときと、合言葉が無いと返ってきたときは
+        // STUN だけで始める（段階3と同じ動き）。直接つながる相手とはそれで繋がる
+        let iceServers: RTCIceServer[] = [];
+        try {
+          const res = await fetch("/api/turn-credentials");
+          if (res.ok) {
+            const d = await res.json();
+            iceServers = Array.isArray(d?.iceServers) ? d.iceServers : [];
+          } else {
+            console.warn("[voice] 中継の合言葉を取れなかった: status " + res.status + "（STUNのみで続ける）");
+          }
+        } catch (e) {
+          console.warn("[voice] 中継の合言葉を取りに行けなかった（STUNのみで続ける）", e);
+        }
+        if (cancelled) return;
+
         const v = await startVoice({
           peerId: call.peerId,
           role: call.role,
+          iceServers,
           send: (m) => { send(m); },
           onRemoteStream: (stream) => {
             const a = audioRef.current;
