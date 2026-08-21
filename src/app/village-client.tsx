@@ -28,7 +28,7 @@ import {
 import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/village/demo-drift";
 import SidePanel, { SIDE_PANEL_W } from "./side-panel";
 import type { MonthlyResult } from "@/lib/monthly-format";
-import { startVoice, type VoiceCall } from "@/lib/webrtc";
+import { startVoice, nextVoicePhase, voiceStatusText, type VoiceCall, type VoicePhase } from "@/lib/webrtc";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 村の拡大率。
@@ -163,6 +163,24 @@ export default function VillagePage({
   // 自分の音声を止めているか。**通話ごとに false から始める**（前の通話の状態を持ち越さない）。
   // 相手には送らない（段階1のメッセージの型を増やさない）。相手からは「無音」に聞こえる
   const [muted, setMuted] = useState(false);
+  // 通話の接続の状態（段階5）。**画面に出すのはこれだけで、音は出さない。**
+  //
+  // 「繋がった」= connected になったこと。「繋がらなかった」= failed になったこと。
+  // 「切れた」= 一度 connected になった後に disconnected か failed になったこと。
+  //   connecting : つないでいます
+  //   connected  : つながりました
+  //   failed     : 一度も繋がらずに失敗した
+  //   lost       : 繋がった後に切れた
+  // 繋がらなかった場合と切れた場合を分けるため、一度でも connected になったかを控える
+  const [voicePhase, setVoicePhase] = useState<VoicePhase>("connecting");
+  // 判定に渡す「いまの段階」。state は次の描画まで新しい値にならないため、控えを持つ
+  const voicePhaseRef = useRef<VoicePhase>("connecting");
+  const everConnectedRef = useRef(false);
+  // 通話が既に終わっているか。文言を数秒残す間だけ真になる。
+  // この間はボタンを出さない（押しても効かないため）
+  const [callEnded, setCallEnded] = useState(false);
+  // 文言を消すための時計。通話をやり直したときに前の時計が残らないよう、必ず片付ける
+  const endTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 集中中の相手に呼びかける前の確認
   const [confirmCall, setConfirmCall] = useState<number | null>(null);
   // 村の拡大率。"fit" は画面に全体が入る大きさ、"close" は2倍（スクロールする）
@@ -268,6 +286,20 @@ export default function VillagePage({
     const a = audioRef.current;
     if (a) { a.pause(); a.srcObject = null; }
   }, []);
+
+  // 通話にまつわる控えを、次の通話のために全部戻す（段階5）。
+  // closeVoice と分けてあるのは、closeVoice が「マイクを離す」ことだけに責任を持つため
+  const resetVoiceState = useCallback(() => {
+    if (endTimerRef.current !== null) { clearTimeout(endTimerRef.current); endTimerRef.current = null; }
+    everConnectedRef.current = false;
+    voicePhaseRef.current = "connecting";
+    setVoicePhase("connecting");
+    setCallEnded(false);
+  }, []);
+
+  // 接続の状態から出す文言（段階5）。**文言も判定も webrtc.ts に置いてある。**
+  // ここで組み立てると、状態の出どころと表示が離れて、ずれても気づけなくなる
+  const voiceStatus = voiceStatusText(voicePhase);
 
   // ミュートの切り替え。**画面側からトラックを直接触らない**（webrtc.ts の VoiceCall を通す）
   const toggleMute = useCallback(() => {
@@ -507,8 +539,10 @@ export default function VillagePage({
             setIncoming(null);
             setCallNotice("他の端末で応答しました");
           } else if (d.type === "call.hangup") {
-            // 相手が切った。音声の接続とマイクを先に閉じ、そのあと状態を解く（段階3）
+            // 相手が切った。音声の接続とマイクを先に閉じ、そのあと状態を解く（段階3）。
+            // 接続の状態の控えもここで戻す（段階5。次の通話へ持ち越さない）
             closeVoice();
+            resetVoiceState();
             setCall(null);
             setCallNotice("通話が終わりました");
           } else if (d.type === "call.offer" || d.type === "call.answer" || d.type === "call.candidate") {
@@ -1120,8 +1154,33 @@ export default function VillagePage({
     // 音声とマイクを先に止める。相手に知らせる前に止めることで、
     // 送信に失敗しても自分のマイクが掴まれたままにならない（段階3）
     closeVoice();
+    resetVoiceState();
     setCall(null);
     if (peer != null) send({ type: "call.hangup", to: peer });
+  }, [send, closeVoice, resetVoiceState]);
+
+  // 繋がらなかったとき・切れたときに通話を終える（段階5）。
+  //
+  // ここで3つを行う。順序に意味がある。
+  //   1. マイクを離す（closeVoice）。**先に離す。** 送信に失敗しても掴んだままにならない
+  //   2. 相手へ通話を切る合図を送る。片側だけ「通話中」のまま残らないようにする
+  //   3. 文言を数秒だけ残してから、通話中の表示を消す。
+  //      すぐ消すと、何が起きたのかを読む前に画面から無くなる
+  const endCallAfterFailure = useCallback(() => {
+    const peer = callRef.current?.peerId;
+    closeVoice();
+    setCallEnded(true);
+    if (peer != null) send({ type: "call.hangup", to: peer });
+    if (endTimerRef.current !== null) clearTimeout(endTimerRef.current);
+    // 4秒。読んで理解できる長さで、かつ操作の邪魔にならない長さにする
+    endTimerRef.current = setTimeout(() => {
+      endTimerRef.current = null;
+      setCall(null);
+      setCallEnded(false);
+      setVoicePhase("connecting");
+      voicePhaseRef.current = "connecting";
+      everConnectedRef.current = false;
+    }, 4_000);
   }, [send, closeVoice]);
 
   // 通話の状態が立ったら音声を繋ぐ。**マイクを取るのはここだけ**（段階3）。
@@ -1132,6 +1191,8 @@ export default function VillagePage({
   // 通話が終われば（call が null になれば）閉じる。マイクもここで止まる
   useEffect(() => {
     if (!call) { closeVoice(); return; }
+    // 新しい通話の始まり。前の通話の控え（一度繋がったか・文言・時計）を持ち越さない
+    resetVoiceState();
     let cancelled = false;
     void (async () => {
       try {
@@ -1139,6 +1200,18 @@ export default function VillagePage({
           peerId: call.peerId,
           role: call.role,
           send: (m) => { send(m); },
+          // 接続の状態を画面へ伝える（段階5）。**判定はここでは行わず、状態をそのまま渡す。**
+          // 「繋がらなかった」と「切れた」の区別は、一度 connected になったかで決まる
+          onState: (s) => {
+            if (cancelled) return;
+            if (s === "connected") everConnectedRef.current = true;
+            // **判定は webrtc.ts の nextVoicePhase だけが行う。** ここでは呼ぶだけ
+            const phase = nextVoicePhase(voicePhaseRef.current, s, everConnectedRef.current);
+            voicePhaseRef.current = phase;
+            setVoicePhase(phase);
+            // 終わったと判定された場合だけ通話を畳む（副作用は状態の更新関数の外で呼ぶ）
+            if (phase === "failed" || phase === "lost") endCallAfterFailure();
+          },
           onRemoteStream: (stream) => {
             const a = audioRef.current;
             if (!a) return;
@@ -1157,10 +1230,14 @@ export default function VillagePage({
       }
     })();
     return () => { cancelled = true; };
-  }, [call, send, closeVoice, applySignal]);
+  }, [call, send, closeVoice, applySignal, resetVoiceState, endCallAfterFailure]);
 
-  // 画面を離れるとき。**マイクを掴んだままにしない**
-  useEffect(() => () => closeVoice(), [closeVoice]);
+  // 画面を離れるとき。**マイクを掴んだままにしない**。
+  // 文言を消すための時計も片付ける（消えた画面に対して setState が走らないようにする）
+  useEffect(() => () => {
+    closeVoice();
+    if (endTimerRef.current !== null) { clearTimeout(endTimerRef.current); endTimerRef.current = null; }
+  }, [closeVoice]);
 
   // 呼びかけへの返事。
   //
@@ -1278,6 +1355,31 @@ export default function VillagePage({
           </span>
         )}
       </header>
+
+      {/* 狭い画面での通話中（段階5）。
+          サイドパネルは村と並べられる幅が無いと出さない作りだが、それだと
+          通話に入った後に切ることもミュートすることもできなくなる。
+          **通話中だけ**を村の上に横いっぱいで出す。
+          いまの村・話しかけやすい人・部屋の空き・今月の勤怠は、狭い画面では出さないままにする */}
+      {!showSidePanel && call && (
+        <div className="px-3 pt-3">
+          <SidePanel
+            people={people}
+            rooms={rooms}
+            counts={counts}
+            notes={notes}
+            nameOf={nameOf}
+            monthly={monthly}
+            call={call}
+            onHangUp={hangUp}
+            muted={muted}
+            onToggleMute={toggleMute}
+            callStatus={voiceStatus}
+            callEnded={callEnded}
+            only="call"
+          />
+        </div>
+      )}
 
       {/* 一覧を畳んでいるときは村を中央に置く。左に寄せると右が大きく空く（審査役B）*/}
       <div className={"flex items-start gap-3 p-3 " + (showRoster ? "" : "justify-center")}>
@@ -1675,6 +1777,8 @@ export default function VillagePage({
             onHangUp={hangUp}
             muted={muted}
             onToggleMute={toggleMute}
+            callStatus={voiceStatus}
+            callEnded={callEnded}
           />
         )}
 
@@ -1824,7 +1928,8 @@ export default function VillagePage({
               </p>
             )}
             <p className="mt-2 text-xs" style={{ color: "var(--tk-ink-soft)" }}>
-              「いま話せます」を押すと通話中になります（音はまだ出ません。次の段階で作ります）
+              {/* 段階3で音が出るようになったため、段階2の文言（音はまだ出ません）を実体に合わせた */}
+              「いま話せます」を押すと通話が始まります。マイクの使用許可を求める表示が出ます
             </p>
             <div className="mt-3 flex gap-2">
               <button
