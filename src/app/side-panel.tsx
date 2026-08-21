@@ -49,7 +49,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function SidePanel({
-  people, rooms, counts, notes, nameOf, monthly, call, onHangUp, muted, onToggleMute,
+  people, rooms, counts, notes, nameOf, monthly, call, onHangUp, muted, onToggleMute, micUnavailable,
 }: {
   people: Presence[];
   rooms: Room[];
@@ -62,6 +62,11 @@ export default function SidePanel({
   /** 自分の音声を止めているか（段階3）。状態を持つのは画面側で、ここは出すだけ */
   muted?: boolean;
   onToggleMute?: () => void;
+  /**
+   * マイクが使えていないか（段階5）。判定は画面側で行い、ここは出すだけ。
+   * 偽・未指定のときは何も出さない（空の行も、「使えています」も出さない）
+   */
+  micUnavailable?: boolean;
   // 自分の今月の勤怠。**未ログインのときと、取れなかったときは null。**
   // null ならパネルごと出さない（空の枠も、断りの文も出さない）
   monthly?: MonthlyResult["total"] | null;
@@ -90,22 +95,35 @@ export default function SidePanel({
           相手の名前はDBの表示名（nameOf）で引く。自己申告の名前は使わない */}
       {call && (
         <Section title="通話中">
-          <div className="flex items-center gap-2 px-3 py-2">
-            <span className="truncate text-xs font-bold">{nameOf(call.peerId)}</span>
-            {/* ボタンの形・余白・角丸は「切る」と同じ（tk-btn / px-2 py-0 / 角丸なし）。
-                ミュート中だけ背景を変えて、止まっていることが分かるようにする。
-                ミュートは相手に伝えない（段階1のメッセージの型を増やさないため） */}
-            <span className="ml-auto flex shrink-0 items-center gap-1">
-              <button
-                onClick={onToggleMute}
-                className="tk-btn px-2 py-0 text-[11px]"
-                style={muted ? { background: "var(--tk-straw)", color: "var(--tk-ink)" } : undefined}
-                aria-pressed={muted === true}
-              >
-                {muted ? "ミュート解除" : "ミュート"}
-              </button>
-              <button onClick={onHangUp} className="tk-btn px-2 py-0 text-[11px]">切る</button>
-            </span>
+          <div className="px-3 py-2">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-xs font-bold">{nameOf(call.peerId)}</span>
+              {/* ボタンの形・余白・角丸は「切る」と同じ（tk-btn / px-2 py-0 / 角丸なし）。
+                  ミュート中だけ背景を変えて、止まっていることが分かるようにする。
+                  ミュートは相手に伝えない（段階1のメッセージの型を増やさないため） */}
+              <span className="ml-auto flex shrink-0 items-center gap-1">
+                <button
+                  onClick={onToggleMute}
+                  className="tk-btn px-2 py-0 text-[11px]"
+                  style={muted ? { background: "var(--tk-straw)", color: "var(--tk-ink)" } : undefined}
+                  aria-pressed={muted === true}
+                >
+                  {muted ? "ミュート解除" : "ミュート"}
+                </button>
+                <button onClick={onHangUp} className="tk-btn px-2 py-0 text-[11px]">切る</button>
+              </span>
+            </div>
+            {/* マイクが使えていないとき（段階5）。**使えているときは何も出さない。**
+                色は既にある赤（--tk-red。ヘッダの「切断されました」と同じ）を使い、
+                文字の大きさは通話中パネルの他の文字と同じ text-xs にする。
+                新しい書き方は持ち込まない。読み上げに拾わせるため role="status" を付ける。
+                置く位置は相手の名前の下。接続の状態の行（feature/voice-state-ui）が
+                入ったときは、その下に並ぶ */}
+            {micUnavailable && (
+              <p className="mt-1 text-xs font-bold" style={{ color: "var(--tk-red)" }} role="status">
+                マイクが使えません。相手にこちらの声は届いていません
+              </p>
+            )}
           </div>
         </Section>
       )}
