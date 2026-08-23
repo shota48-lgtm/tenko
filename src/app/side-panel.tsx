@@ -49,7 +49,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function SidePanel({
-  people, rooms, counts, notes, nameOf, monthly, call, onHangUp, muted, onToggleMute, micUnavailable,
+  people, rooms, counts, notes, nameOf, monthly, call, onHangUp, muted, onToggleMute,
+  callStatus, callEnded, only, micUnavailable,
 }: {
   people: Presence[];
   rooms: Room[];
@@ -63,8 +64,26 @@ export default function SidePanel({
   muted?: boolean;
   onToggleMute?: () => void;
   /**
-   * マイクが使えていないか（段階5）。判定は画面側で行い、ここは出すだけ。
-   * 偽・未指定のときは何も出さない（空の行も、「使えています」も出さない）
+   * 通話の接続の状態を表す1行（段階5）。判定は画面側で行い、ここは出すだけ。
+   * 相手の名前の下に置く。
+   */
+  callStatus?: string;
+  /**
+   * 通話が既に終わっているか（繋がらなかった・切れた）。
+   * 終わっている間はボタンを出さない。押しても効かないものを残すと、
+   * 「押したのに切れない」と読めてしまうため
+   */
+  callEnded?: boolean;
+  /**
+   * 通話中だけを出す形にする（段階5）。
+   * 狭い画面では村と並べられないが、切ることとミュートだけはできる必要がある。
+   * このとき幅は呼ぶ側に合わせる（300px を固定すると画面からはみ出す）
+   */
+  only?: "call";
+  /**
+   * マイクが使えていないか（段階5の後半）。判定は画面側で行い、ここは出すだけ。
+   * 偽・未指定のときは何も出さない（空の行も、「使えています」も出さない）。
+   * 接続の状態の行（callStatus）とは別物で、両方が同時に出ることがある
    */
   micUnavailable?: boolean;
   // 自分の今月の勤怠。**未ログインのときと、取れなかったときは null。**
@@ -84,9 +103,9 @@ export default function SidePanel({
 
   return (
     <aside
-      className="shrink-0 space-y-3"
-      style={{ width: SIDE_PANEL_W }}
-      aria-label="村の様子"
+      className={only === "call" ? "space-y-3" : "shrink-0 space-y-3"}
+      style={{ width: only === "call" ? "100%" : SIDE_PANEL_W }}
+      aria-label={only === "call" ? "通話" : "村の様子"}
     >
       {/* 通話中（段階2の修正で、画面下端の帯からここへ移した）。
           下端は知らせ（呼びかけました・返事がありました）が流れる場所で、
@@ -100,25 +119,37 @@ export default function SidePanel({
               <span className="truncate text-xs font-bold">{nameOf(call.peerId)}</span>
               {/* ボタンの形・余白・角丸は「切る」と同じ（tk-btn / px-2 py-0 / 角丸なし）。
                   ミュート中だけ背景を変えて、止まっていることが分かるようにする。
-                  ミュートは相手に伝えない（段階1のメッセージの型を増やさないため） */}
-              <span className="ml-auto flex shrink-0 items-center gap-1">
-                <button
-                  onClick={onToggleMute}
-                  className="tk-btn px-2 py-0 text-[11px]"
-                  style={muted ? { background: "var(--tk-straw)", color: "var(--tk-ink)" } : undefined}
-                  aria-pressed={muted === true}
-                >
-                  {muted ? "ミュート解除" : "ミュート"}
-                </button>
-                <button onClick={onHangUp} className="tk-btn px-2 py-0 text-[11px]">切る</button>
-              </span>
+                  ミュートは相手に伝えない（段階1のメッセージの型を増やさないため）。
+                  既に終わっているときは出さない（押しても効かないため） */}
+              {!callEnded && (
+                <span className="ml-auto flex shrink-0 items-center gap-1">
+                  <button
+                    onClick={onToggleMute}
+                    className="tk-btn px-2 py-0 text-[11px]"
+                    style={muted ? { background: "var(--tk-straw)", color: "var(--tk-ink)" } : undefined}
+                    aria-pressed={muted === true}
+                  >
+                    {muted ? "ミュート解除" : "ミュート"}
+                  </button>
+                  <button onClick={onHangUp} className="tk-btn px-2 py-0 text-[11px]">切る</button>
+                </span>
+              )}
             </div>
-            {/* マイクが使えていないとき（段階5）。**使えているときは何も出さない。**
+            {/* 接続の状態（段階5）。**相手の名前の下に置く。**
+                文字の大きさと色は「話しかけやすい人」の未記入と同じ指定を使う
+                （text-xs / var(--tk-ink-soft)）。新しい書き方を持ち込まない。
+                読み上げに拾わせるため role="status" を付ける */}
+            {callStatus && (
+              <p className="mt-1 text-xs" style={{ color: "var(--tk-ink-soft)" }} role="status">
+                {callStatus}
+              </p>
+            )}
+            {/* マイクが使えていないとき（段階5の後半）。**使えているときは何も出さない。**
                 色は既にある赤（--tk-red。ヘッダの「切断されました」と同じ）を使い、
                 文字の大きさは通話中パネルの他の文字と同じ text-xs にする。
                 新しい書き方は持ち込まない。読み上げに拾わせるため role="status" を付ける。
-                置く位置は相手の名前の下。接続の状態の行（feature/voice-state-ui）が
-                入ったときは、その下に並ぶ */}
+                置く位置は接続の状態の行の下。接続の可否とマイクの可否は別のことなので、
+                どちらか一方だけを出す形にしない（両方が同時に出ることがある） */}
             {micUnavailable && (
               <p className="mt-1 text-xs font-bold" style={{ color: "var(--tk-red)" }} role="status">
                 マイクが使えません。相手にこちらの声は届いていません
@@ -127,6 +158,12 @@ export default function SidePanel({
           </div>
         </Section>
       )}
+
+      {/* 狭い画面では通話中だけを出す。いまの村・話しかけやすい人・部屋の空き・今月の勤怠は出さない
+          （村と並べられる幅が無いため。判定は呼ぶ側） */}
+      {only === "call" ? null : (
+      <>
+
 
       <Section title="いまの村">
         <p className="px-3 py-2 text-xs whitespace-nowrap">
@@ -213,6 +250,8 @@ export default function SidePanel({
             ))}
           </ul>
         </Section>
+      )}
+      </>
       )}
     </aside>
   );
