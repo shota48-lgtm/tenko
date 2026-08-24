@@ -1228,6 +1228,18 @@ export default function VillagePage({
     }, 4_000);
   }, [send, closeVoice]);
 
+  // つなぎ直しの期限を過ぎたときの後始末（段階6）。
+  //
+  // **期限を数えているのは webrtc.ts。** 接続の状態を受け取っている側に判定を置いてある。
+  // ここでやるのは、終わったことを画面に反映することだけ。
+  // 終え方は、繋がらなかった場合と同じ道を通す
+  // （マイクを離し、相手へ切る合図を送り、文言を数秒残す）
+  const onReconnectGiveUp = useCallback(() => {
+    voicePhaseRef.current = "lost";
+    setVoicePhase("lost");
+    endCallAfterFailure();
+  }, [endCallAfterFailure]);
+
   // 通話の状態が立ったら音声を繋ぐ。**マイクを取るのはここだけ**（段階3）。
   //
   // 承認した側（callee）が接続情報を作って送り、呼びかけた側（caller）は待つ
@@ -1278,9 +1290,16 @@ export default function VillagePage({
             const phase = nextVoicePhase(voicePhaseRef.current, s, everConnectedRef.current);
             voicePhaseRef.current = phase;
             setVoicePhase(phase);
+
+            // つなぎ直しの最中は通話を畳まない（段階6）。
+            // 経路の作り直しと期限の判定は webrtc.ts が行う。ここでは文言が変わるだけで、
+            // マイクも離さないし、相手へ切る合図も送らない
+            if (phase === "reconnecting") return;
             // 終わったと判定された場合だけ通話を畳む（副作用は状態の更新関数の外で呼ぶ）
             if (phase === "failed" || phase === "lost") endCallAfterFailure();
           },
+          // 期限までに戻らなかった場合（段階6）
+          onReconnectGiveUp,
           onRemoteStream: (stream) => {
             const a = audioRef.current;
             if (!a) return;
@@ -1302,14 +1321,42 @@ export default function VillagePage({
       }
     })();
     return () => { cancelled = true; };
-  }, [call, send, closeVoice, applySignal, resetVoiceState, endCallAfterFailure]);
+  }, [call, send, closeVoice, applySignal, resetVoiceState, endCallAfterFailure, onReconnectGiveUp]);
 
   // 画面を離れるとき。**マイクを掴んだままにしない**。
-  // 文言を消すための時計も片付ける（消えた画面に対して setState が走らないようにする）
+  // 文言を消すための時計も片付ける（消えた画面に対して setState が走らないようにする）。
+  //
+  // ここが走るのは **別の画面へ移った場合だけ**（React が片付けを呼ぶため）。
+  // タブを閉じた場合と再読み込みの場合は走らない。そちらは下の pagehide で扱う。
+  //
+  // 相手へ切る合図も送る（段階6）。送らないと、相手は段階6のつなぎ直しに入り、
+  // 60秒待ってから通話を終えることになる。戻らないと分かっているなら待たせる必要はない
   useEffect(() => () => {
+    const peer = callRef.current?.peerId;
     closeVoice();
     if (endTimerRef.current !== null) { clearTimeout(endTimerRef.current); endTimerRef.current = null; }
-  }, [closeVoice]);
+    if (peer != null) send({ type: "call.hangup", to: peer });
+  }, [closeVoice, send]);
+
+  // タブを閉じた場合と、ページを再読み込みした場合の後始末（段階6）。
+  //
+  // **React の片付けはこの2つでは走らない。** そのため別に構える。
+  // 使うのは pagehide。beforeunload はブラウザによっては呼ばれず、
+  // 戻る操作でページが保管される場合にも困る。
+  //
+  // **ここで送る合図は届かないことがある。** 閉じる途中で通信が切られるためで、
+  // 届かなかった場合は相手側が60秒で通話を終える（段階6の期限）。
+  // 届けば相手はすぐ終えられる。どちらでも破綻しない作りにしてある
+  useEffect(() => {
+    const onPageHide = () => {
+      const peer = callRef.current?.peerId;
+      if (peer == null) return;
+      closeVoice();
+      send({ type: "call.hangup", to: peer });
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [closeVoice, send]);
 
   // 呼びかけへの返事。
   //

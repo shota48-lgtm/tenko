@@ -38,12 +38,23 @@ export const STUN_URLS = ["stun:stun.cloudflare.com:3478"];
  *   接続の状態（RTCPeerConnectionState）を持っているのはこのファイルである。
  *   画面側で判定を組むと、状態の出どころと判定が離れ、実体と表示がずれても気づけない。
  *
- *   connecting : つないでいる最中（new / connecting）
- *   connected  : つながった
- *   failed     : **一度も connected にならずに** failed になった
- *   lost       : connected になった後に disconnected か failed になった
+ *   connecting   : つないでいる最中（new / connecting）
+ *   connected    : つながった
+ *   reconnecting : connected になった後に disconnected になり、つなぎ直している最中（段階6）
+ *   failed       : **一度も connected にならずに** failed になった
+ *   lost         : 通話が終わった。つなぎ直しに使える時間を過ぎた場合と、failed の場合
  */
-export type VoicePhase = "connecting" | "connected" | "failed" | "lost";
+export type VoicePhase = "connecting" | "connected" | "reconnecting" | "failed" | "lost";
+
+/**
+ * つなぎ直しに使える時間（ミリ秒）。**これを過ぎたら通話を終える。**
+ *
+ * 無期限に試み続けると、相手がタブを閉じた場合に通話中の表示が永久に残る。
+ * 相手が戻ってこないことを、こちら側からは知る手立てが無いため、時間で打ち切る。
+ * 60秒にした根拠は、電波の切り替わりや一時的な回線の途切れがこの範囲で戻るのに対し、
+ * それを超える切断は「戻ってこない」ことのほうが多いという想定である（実測ではない）。
+ */
+export const RECONNECT_LIMIT_MS = 60_000;
 
 /**
  * 接続の状態が変わったときの、次の段階を返す。
@@ -59,17 +70,28 @@ export function nextVoicePhase(
   state: RTCPeerConnectionState,
   everConnected: boolean,
 ): VoicePhase {
+  // connected へ戻れば、つなぎ直しの最中であっても通話は続く
   if (state === "connected") return "connected";
-  if (state === "new" || state === "connecting") return "connecting";
+  // **つなぎ直しの最中は connecting に落とさない。**
+  //   ICE をやり直すと状態が connecting を経由することがあり、そこで文言が
+  //   「つないでいます」に戻ると、初回の接続と区別が付かなくなる
+  if (state === "new" || state === "connecting") {
+    return prev === "reconnecting" ? "reconnecting" : "connecting";
+  }
+  // failed はつなぎ直しの対象にしない（段階6）。
+  // disconnected が「経路を見失った」なのに対し、failed は ICE が尽きた状態で、
+  // 同じ経路の作り直しでは戻らない
   if (state === "failed") return everConnected ? "lost" : "failed";
-  // 繋がる前の disconnected は途中の状態。まだ「切れた」とは言えない
-  if (state === "disconnected") return everConnected ? "lost" : prev;
+  // 繋がる前の disconnected は途中の状態。まだ「切れた」とは言えない。
+  // 一度繋がった後の disconnected は、つなぎ直しを試みる（段階6）
+  if (state === "disconnected") return everConnected ? "reconnecting" : prev;
   return prev;
 }
 
 /** 段階ごとに画面へ出す文言。**文言を書くのはここ1か所だけにする。** */
 export function voiceStatusText(phase: VoicePhase): string {
   if (phase === "connected") return "つながりました";
+  if (phase === "reconnecting") return "つなぎ直しています";
   if (phase === "failed") return "相手とつながりませんでした";
   if (phase === "lost") return "通話が切れました";
   return "つないでいます";
@@ -115,6 +137,24 @@ export type VoiceCall = {
    * 対処（許可し直して入り直す）も同じだからである。
    */
   micAvailable(): boolean;
+  /**
+   * つなぎ直しを試みる（段階6）。**通話は終えない。マイクも離さない。**
+   *
+   * 呼びかけからやり直さない。いま繋がっている RTCPeerConnection をそのまま使い、
+   * 経路の選び直し（ICE のやり直し）だけを行う。相手には既にある call.offer で届くため、
+   * ws-server に新しい種別を足す必要はない。
+   *
+   * **接続情報を作り直すのは承認した側（callee）だけ。**
+   *   初回と同じ向きに揃えてある（ws-messages.ts の設計メモ 2）。
+   *   両方が同時に作ると衝突して、どちらの接続情報も通らなくなる。
+   *   呼びかけた側は相手の作り直しを待つ。待つ側では false を返す。
+   *
+   * 戻り値は「自分から作り直しを送ったか」であり、繋がり直せたかではない。
+   * 繋がり直せたかは connectionState が connected へ戻るかで判る
+   */
+  restart(): Promise<boolean>;
+  /** いまつなぎ直しの最中か（段階6）。試験と自己点検のために外から見えるようにしておく */
+  isReconnecting(): boolean;
 };
 
 /**
@@ -136,8 +176,31 @@ export async function startVoice(opts: {
    * 通話を始められないことではない（直接つながる相手とは繋がる）
    */
   iceServers?: RTCIceServer[];
+  /**
+   * つなぎ直しに使える時間を過ぎたときに呼ばれる（段階6）。
+   * ここで通話を終える。**呼ばれるのは1回だけ。**
+   */
+  onReconnectGiveUp?: () => void;
+  /**
+   * つなぎ直しの期限。**既定は RECONNECT_LIMIT_MS。試験でだけ短くする。**
+   * 60秒を実際に待つ試験は、待っている間に何も確かめられない
+   */
+  reconnectLimitMs?: number;
+  /**
+   * 時計。**試験で差し替えるためだけにある。** 既定はブラウザの setTimeout。
+   * 差し替えられるようにしてあるのは、期限の判定を実際に60秒待たずに確かめるため
+   */
+  timers?: {
+    set: (fn: () => void, ms: number) => unknown;
+    clear: (handle: unknown) => void;
+  };
 }): Promise<VoiceCall> {
-  const { peerId, role, send, onRemoteStream, onState } = opts;
+  const { peerId, role, send, onRemoteStream, onState, onReconnectGiveUp } = opts;
+  const reconnectLimitMs = opts.reconnectLimitMs ?? RECONNECT_LIMIT_MS;
+  const timers = opts.timers ?? {
+    set: (fn: () => void, ms: number) => setTimeout(fn, ms),
+    clear: (h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>),
+  };
 
   // 音声だけ。映像は取らない（取ると許可の求め方が変わり、通信量も跳ね上がる）。
   //
@@ -154,6 +217,11 @@ export async function startVoice(opts: {
     console.warn("[voice] マイクを取れなかった（相手の声は聞こえるが、こちらの声は届かない）", e);
     local = new MediaStream();
   }
+
+  // マイクが使えたかを、**通話を始めた時点で控える**（段階6）。
+  // 品質の記録に出すために使う。閉じるときに数え直すと、その時点では
+  // トラックを外した後なので、常に「使えなかった」になってしまう
+  const micWasAvailable = local.getAudioTracks().length > 0;
 
   // STUN は必ず入れる。中継の設定は、あれば後ろに足す。
   // **STUN_URLS の値は変えない**（段階3で確かめた、無料・無登録のもの）
@@ -254,7 +322,10 @@ export async function startVoice(opts: {
       " / 送った小包 " + packetsSent +
       " / 揺らぎ " + ms(jitter) +
       " / 往復 " + ms(sel?.rtt) +
-      " / 埋めた標本 " + concealed + "（" + pct(concealed, samples) + "）";
+      " / 埋めた標本 " + concealed + "（" + pct(concealed, samples) + "）" +
+      // マイクを拒否した通話では、埋めた標本が高い値になる（送るものが無いため）。
+      // 記録だけを見て「回線が悪い」と読み違えないよう、可否を並べて出す（段階6）
+      " / マイク " + (micWasAvailable ? "使えた" : "使えなかった");
   };
 
   // 2秒ごとに読む。閉じる直前の値を持っておくため
@@ -266,6 +337,71 @@ export async function startVoice(opts: {
   const pending: RTCIceCandidateInit[] = [];
   let remoteSet = false;
   let closed = false;
+
+  // ── つなぎ直し（段階6） ──────────────────────────────────────────────
+  //
+  // ここに置く理由:
+  //   接続の状態を受け取っているのはこのファイルであり、期限の判定もここに置くと
+  //   状態と判定が同じ場所に揃う。画面側に置くと、実際の接続と画面の都合が混ざる。
+  //   時計を差し替えられるようにしてあるので、60秒を待たずに確かめられる。
+  //
+  // **一度でも connected になっていなければ、つなぎ直さない。**
+  //   まだ繋がったことのない接続の disconnected は、繋がる途中の状態にすぎない。
+  let everConnected = false;
+  let reconnecting = false;
+  let gaveUp = false;
+  let limitTimer: unknown = null;
+
+  const clearLimit = () => {
+    if (limitTimer !== null) { timers.clear(limitTimer); limitTimer = null; }
+  };
+
+  /** 経路を作り直す。承認した側だけが送る（衝突を避けるため） */
+  const doRestart = async (): Promise<boolean> => {
+    if (closed) return false;
+    if (role !== "callee") {
+      console.log("[voice] つなぎ直し: 相手の作り直しを待つ");
+      return false;
+    }
+    try {
+      // iceRestart で経路の候補を集め直す。**トラックは差し替えない**ので、
+      // マイクは掴んだままになる（つなぎ直しの間も離さない）
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+      send({ type: "call.offer", to: peerId, sdp: offer.sdp ?? "" });
+      console.log("[voice] つなぎ直し: 経路を作り直して送った");
+      return true;
+    } catch (e) {
+      // 作り直せなくても通話は畳まない。期限の判定に任せる
+      console.warn("[voice] つなぎ直し: 作り直せなかった", e);
+      return false;
+    }
+  };
+
+  const beginReconnect = () => {
+    // **既に始まっていれば何もしない。** disconnected は繋がらない間ずっと届くため、
+    // そのたびに数え直すと期限が後ろへずれ、いつまでも打ち切られなくなる
+    if (closed || reconnecting || gaveUp) return;
+    reconnecting = true;
+    console.log("[voice] つなぎ直しを始める（" + Math.round(reconnectLimitMs / 1000) + "秒まで待つ）");
+    void doRestart();
+    limitTimer = timers.set(() => {
+      limitTimer = null;
+      if (closed || !reconnecting) return;
+      reconnecting = false;
+      gaveUp = true;
+      console.log("[voice] つなぎ直しの期限を過ぎた。通話を終える");
+      onReconnectGiveUp?.();
+    }, reconnectLimitMs);
+  };
+
+  const endReconnect = () => {
+    if (!reconnecting) { clearLimit(); return; }
+    reconnecting = false;
+    clearLimit();
+    console.log("[voice] つなぎ直しに成功した");
+  };
+  // ── つなぎ直しはここまで ─────────────────────────────────────────────
 
   const drain = async () => {
     while (pending.length > 0) {
@@ -286,9 +422,19 @@ export async function startVoice(opts: {
   };
   pc.onconnectionstatechange = () => {
     console.log("[voice] 接続の状態: " + pc.connectionState);
+    const s = pc.connectionState;
     // 繋がった時点で経路を出す。2秒の間隔を待たずに読む
-    if (pc.connectionState === "connected") void readStats();
-    onState?.(pc.connectionState);
+    if (s === "connected") { everConnected = true; void readStats(); }
+
+    // つなぎ直しの出入り（段階6）。**画面へ伝える前に決める。**
+    //   connected へ戻れば、つなぎ直しは終わり（通話は続く）
+    //   一度繋がった後の disconnected なら、つなぎ直しを始める
+    //   failed はつなぎ直さない。ICE が尽きた状態で、作り直しでは戻らない
+    if (s === "connected") endReconnect();
+    else if (s === "disconnected" && everConnected) beginReconnect();
+    else if (s === "failed") { reconnecting = false; clearLimit(); }
+
+    onState?.(s);
   };
 
   // **承認した側が先に接続情報を作る**（ws-messages.ts の設計メモ 2 のとおり）。
@@ -322,6 +468,8 @@ export async function startVoice(opts: {
       if (!remoteSet) { pending.push(c); return; }
       try { await pc.addIceCandidate(c); } catch (e) { console.warn("[voice] 候補を入れられなかった", e); }
     },
+    restart() { return doRestart(); },
+    isReconnecting() { return reconnecting; },
     setMuted(muted: boolean) {
       if (closed) return;
       // 画面側からトラックを直接触らせない。ここ1か所で切り替える
@@ -337,12 +485,22 @@ export async function startVoice(opts: {
       // **品質の記録を、閉じる前に出す。** 閉じた後は統計を読めない。
       // closed を立てる前に出すのは、readStats が closed を見て何もしなくなるため
       if (lastQuality) console.log(lastQuality);
-      else console.log("[voice] 品質: 記録なし（繋がる前に終わった）");
+      else console.log("[voice] 品質: 記録なし（繋がる前に終わった） / マイク " + (micWasAvailable ? "使えた" : "使えなかった"));
       if (poller !== null) { clearInterval(poller); poller = null; }
+      // つなぎ直しの時計も止める（段階6）。残すと、閉じた通話に対して期限が鳴る
+      reconnecting = false;
+      clearLimit();
 
       closed = true;
-      // **マイクを先に止める。** 後回しにすると、閉じる途中で失敗したときに掴んだままになる
-      for (const track of local.getTracks()) track.stop();
+      // **マイクを先に止める。** 後回しにすると、閉じる途中で失敗したときに掴んだままになる。
+      // 止めたトラックはストリームからも外す（段階6）。
+      // 止めるだけだと readyState が ended のまま残り続け、通話のたびに1本ずつ増える。
+      // 増えた分は誰も使わないが、本数を見て判断する処理（micActive・micAvailable）が
+      // 「ある」と答えてしまうため、数えられる状態から外しておく
+      for (const track of local.getTracks()) {
+        track.stop();
+        local.removeTrack(track);
+      }
       pc.onicecandidate = null;
       pc.ontrack = null;
       pc.onconnectionstatechange = null;
