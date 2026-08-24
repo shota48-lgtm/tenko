@@ -106,6 +106,15 @@ export type VoiceCall = {
   close(): void;
   /** いまマイクを掴んでいるか（試験と自己点検のために外から見えるようにしておく） */
   micActive(): boolean;
+  /**
+   * マイクが使えているか（段階5）。
+   *
+   * **偽でも通話は成立する。** 相手の声は聞こえ、こちらの声だけが届かない。
+   * 偽になるのは、マイクの取得が拒否された場合と、取れた音声トラックが0本の場合。
+   * この2つを分けない理由は、利用者から見ればどちらも「声が届かない」であり、
+   * 対処（許可し直して入り直す）も同じだからである。
+   */
+  micAvailable(): boolean;
 };
 
 /**
@@ -130,8 +139,21 @@ export async function startVoice(opts: {
 }): Promise<VoiceCall> {
   const { peerId, role, send, onRemoteStream, onState } = opts;
 
-  // 音声だけ。映像は取らない（取ると許可の求め方が変わり、通信量も跳ね上がる）
-  const local = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  // 音声だけ。映像は取らない（取ると許可の求め方が変わり、通信量も跳ね上がる）。
+  //
+  // **許可が下りなくても通話は始める（段階5）。**
+  //   以前はここで例外が出て、通話そのものが始まらなかった。
+  //   だが「自分の声が届かない」ことと「相手の声も聞こえない」ことは別である。
+  //   マイクを断った人にも、相手の声は聞こえてよい（聞くだけの参加ができる）。
+  //   声が届いていないことは画面に出す（micAvailable を見て画面側が出す）。
+  let local: MediaStream;
+  try {
+    local = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (e) {
+    // 断られた・マイクが無い・別のアプリが掴んでいる。**通話は続ける**
+    console.warn("[voice] マイクを取れなかった（相手の声は聞こえるが、こちらの声は届かない）", e);
+    local = new MediaStream();
+  }
 
   // STUN は必ず入れる。中継の設定は、あれば後ろに足す。
   // **STUN_URLS の値は変えない**（段階3で確かめた、無料・無登録のもの）
@@ -140,6 +162,11 @@ export async function startVoice(opts: {
 
   const pc = new RTCPeerConnection({ iceServers });
   for (const track of local.getTracks()) pc.addTrack(track, local);
+  // 送るものが1つも無い場合、そのままでは音声の枠が作られず、相手の声も受け取れない。
+  // 受け取る専用の枠を明示して作る
+  if (local.getAudioTracks().length === 0) {
+    pc.addTransceiver("audio", { direction: "recvonly" });
+  }
 
   // ── ここから、切り分けのための記録（段階5の調査） ────────────────────────
   //
@@ -324,6 +351,11 @@ export async function startVoice(opts: {
     },
     micActive() {
       return local.getTracks().some((t) => t.readyState === "live");
+    },
+    micAvailable() {
+      // 取れた音声トラックが0本なら使えていない。
+      // 取得が拒否された場合も、上で空の MediaStream にしてあるので0本になる
+      return local.getAudioTracks().length > 0;
     },
   };
 }

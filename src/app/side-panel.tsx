@@ -50,7 +50,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 export default function SidePanel({
   people, rooms, counts, notes, nameOf, monthly, call, onHangUp, muted, onToggleMute,
-  callStatus, callEnded, only,
+  callStatus, callEnded, only, micUnavailable,
 }: {
   people: Presence[];
   rooms: Room[];
@@ -80,6 +80,12 @@ export default function SidePanel({
    * このとき幅は呼ぶ側に合わせる（300px を固定すると画面からはみ出す）
    */
   only?: "call";
+  /**
+   * マイクが使えていないか（段階5の後半）。判定は画面側で行い、ここは出すだけ。
+   * 偽・未指定のときは何も出さない（空の行も、「使えています」も出さない）。
+   * 接続の状態の行（callStatus）とは別物で、両方が同時に出ることがある
+   */
+  micUnavailable?: boolean;
   // 自分の今月の勤怠。**未ログインのときと、取れなかったときは null。**
   // null ならパネルごと出さない（空の枠も、断りの文も出さない）
   monthly?: MonthlyResult["total"] | null;
@@ -136,6 +142,17 @@ export default function SidePanel({
             {callStatus && (
               <p className="mt-1 text-xs" style={{ color: "var(--tk-ink-soft)" }} role="status">
                 {callStatus}
+              </p>
+            )}
+            {/* マイクが使えていないとき（段階5の後半）。**使えているときは何も出さない。**
+                色は既にある赤（--tk-red。ヘッダの「切断されました」と同じ）を使い、
+                文字の大きさは通話中パネルの他の文字と同じ text-xs にする。
+                新しい書き方は持ち込まない。読み上げに拾わせるため role="status" を付ける。
+                置く位置は接続の状態の行の下。接続の可否とマイクの可否は別のことなので、
+                どちらか一方だけを出す形にしない（両方が同時に出ることがある） */}
+            {micUnavailable && (
+              <p className="mt-1 text-xs font-bold" style={{ color: "var(--tk-red)" }} role="status">
+                マイクが使えません。相手にこちらの声は届いていません
               </p>
             )}
           </div>

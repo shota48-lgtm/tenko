@@ -29,6 +29,7 @@ import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/vi
 import SidePanel, { SIDE_PANEL_W } from "./side-panel";
 import type { MonthlyResult } from "@/lib/monthly-format";
 import { startVoice, nextVoicePhase, voiceStatusText, type VoiceCall, type VoicePhase } from "@/lib/webrtc";
+import { playRing } from "@/lib/ring";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
 // 村の拡大率。
@@ -163,7 +164,13 @@ export default function VillagePage({
   // 自分の音声を止めているか。**通話ごとに false から始める**（前の通話の状態を持ち越さない）。
   // 相手には送らない（段階1のメッセージの型を増やさない）。相手からは「無音」に聞こえる
   const [muted, setMuted] = useState(false);
-  // 通話の接続の状態（段階5）。**画面に出すのはこれだけで、音は出さない。**
+  // マイクが使えていないか（段階5の後半）。通話ごとに調べ直す。
+  // 真でも通話は続く（相手の声は聞こえる）。こちらの声だけが届かない
+  const [micUnavailable, setMicUnavailable] = useState(false);
+  // どの呼びかけで音を鳴らしたか。**1回の呼びかけにつき1回だけ鳴らす**ための控え。
+  // 開発時は StrictMode が処理を2回走らせるため、回数を数えるだけでは足りない
+  const ringedForRef = useRef<number | null>(null);
+  // 通話の接続の状態（段階5の前半）。**画面に出すのはこれだけで、音は出さない。**
   //
   // 「繋がった」= connected になったこと。「繋がらなかった」= failed になったこと。
   // 「切れた」= 一度 connected になった後に disconnected か failed になったこと。
@@ -283,11 +290,44 @@ export default function VillagePage({
     pendingSignalsRef.current = [];
     // 次の通話はミュートしていない状態から始める
     setMuted(false);
+    // マイクの可否は通話ごとに調べ直す。前の通話の結果を持ち越さない
+    setMicUnavailable(false);
     const a = audioRef.current;
     if (a) { a.pause(); a.srcObject = null; }
   }, []);
 
-  // 通話にまつわる控えを、次の通話のために全部戻す（段階5）。
+  // 呼びかけを受けたときに音を鳴らす（段階5の後半）。
+  //
+  // **呼びかけを受けた側でしか鳴らない。** incoming が立つのは受けた側だけで、
+  // 呼びかけた側にはこの状態が無い（呼びかけた側は call.answered を待つ）。
+  //
+  // 1回の呼びかけにつき1回だけ鳴らす。ringedForRef で見張るのは、
+  // 開発時に StrictMode がこの処理を2回走らせるため。回数を数えるだけでは足りない。
+  // 鳴らせなかった場合は ring.ts の中で握られ、画面には何も出ない
+  useEffect(() => {
+    if (!incoming) { ringedForRef.current = null; return; }
+    if (ringedForRef.current === incoming.id) return;
+    ringedForRef.current = incoming.id;
+    void playRing();
+  }, [incoming]);
+
+  // 呼びかけを受けている間、タブの見出しを変える（段階5）。
+  //
+  // 別のタブを見ているときに気づけるようにする。音は端末の設定で鳴らないことがあるが、
+  // 見出しは必ず変わる。
+  //
+  // **元の見出しは控えておいて戻す。決め打ちの文字列で上書きしない。**
+  //   村の見出しが将来変わったときに、ここが古い値を書き戻す形になるため。
+  // 片付け（return の中）は、呼びかけが消えたとき・通話に入ったとき・
+  // 画面を離れたときのいずれでも走る
+  useEffect(() => {
+    if (!incoming) return;
+    const original = document.title;
+    document.title = "呼びかけ中です - tenko";
+    return () => { document.title = original; };
+  }, [incoming]);
+
+  // 通話にまつわる控えを、次の通話のために全部戻す（段階5の前半）。
   // closeVoice と分けてあるのは、closeVoice が「マイクを離す」ことだけに責任を持つため
   const resetVoiceState = useCallback(() => {
     if (endTimerRef.current !== null) { clearTimeout(endTimerRef.current); endTimerRef.current = null; }
@@ -1250,6 +1290,9 @@ export default function VillagePage({
         });
         if (cancelled) { v.close(); return; }
         voiceRef.current = v;
+        // マイクが使えているかを、通話が始まった時点で1回だけ調べる（段階5）。
+        // 判定そのものは webrtc.ts が持っている（トラックが0本かどうか）
+        setMicUnavailable(!v.micAvailable());
         const queued = pendingSignalsRef.current;
         pendingSignalsRef.current = [];
         for (const q of queued) await applySignal(q.kind, q.value);
@@ -1405,6 +1448,7 @@ export default function VillagePage({
             onToggleMute={toggleMute}
             callStatus={voiceStatus}
             callEnded={callEnded}
+            micUnavailable={micUnavailable}
             only="call"
           />
         </div>
@@ -1808,6 +1852,7 @@ export default function VillagePage({
             onToggleMute={toggleMute}
             callStatus={voiceStatus}
             callEnded={callEnded}
+            micUnavailable={micUnavailable}
           />
         )}
 
