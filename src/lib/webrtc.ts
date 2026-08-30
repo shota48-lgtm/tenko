@@ -42,7 +42,9 @@ export const STUN_URLS = ["stun:stun.cloudflare.com:3478"];
  *   connected    : つながった
  *   reconnecting : connected になった後に disconnected になり、つなぎ直している最中（段階6）
  *   failed       : **一度も connected にならずに** failed になった
- *   lost         : 通話が終わった。つなぎ直しに使える時間を過ぎた場合と、failed の場合
+ *   lost         : 通話が終わった。**つなぎ直しに使える時間を過ぎた場合だけ。**
+ *                  （段階6の改修より前は failed でもここへ来ていた。いまは failed も
+ *                   つなぎ直しの対象なので、failed から直接ここへは来ない）
  */
 export type VoicePhase = "connecting" | "connected" | "reconnecting" | "failed" | "lost";
 
@@ -55,6 +57,32 @@ export type VoicePhase = "connecting" | "connected" | "reconnecting" | "failed" 
  * それを超える切断は「戻ってこない」ことのほうが多いという想定である（実測ではない）。
  */
 export const RECONNECT_LIMIT_MS = 60_000;
+
+/**
+ * 作り直しを繰り返すときに、間にあける時間（ミリ秒）。段階6の改修。
+ *
+ * つなぎ直しの間、経路の作り直しは1回では済まないことがある。
+ * 相手がまだ戻っていない時点で作り直しても、相手からの返事が来ないためである。
+ * そこで期限（60秒）の間、繰り返し作り直す。
+ *
+ * 間隔を5秒にした根拠は、ICE の候補を集め直して相手と突き合わせるのに数秒かかり、
+ * それより短い間隔で送ると、前の作り直しが終わる前に次の接続情報で上書きされるためである。
+ */
+export const RESTART_INTERVAL_MS = 5_000;
+
+/**
+ * 利用者IDが大きい側が、作り直しを始めるまでに待つ時間（ミリ秒）。段階6の改修。
+ *
+ * **両側が同時に接続情報を作ると衝突して、どちらも通らない。**
+ * そこで先後を決める。決め方は「利用者IDの小さい側が先」で、
+ * これは両側が自分と相手のIDを知っているため、相談なしに同じ答えになる。
+ *
+ * 大きい側が待つのは、小さい側が動けない場合（タブが固まった・処理が詰まった等）に
+ * 誰も作り直さないまま期限を迎えることを避けるためである。
+ * 3秒にした根拠は、作り直しが相手に届いて connected へ戻るまでに実測で1〜2秒かかり、
+ * それを待ってなお戻っていなければ「小さい側は動いていない」と見なせるためである。
+ */
+export const RESTART_FOLLOWER_DELAY_MS = 3_000;
 
 /**
  * 接続の状態が変わったときの、次の段階を返す。
@@ -78,10 +106,20 @@ export function nextVoicePhase(
   if (state === "new" || state === "connecting") {
     return prev === "reconnecting" ? "reconnecting" : "connecting";
   }
-  // failed はつなぎ直しの対象にしない（段階6）。
-  // disconnected が「経路を見失った」なのに対し、failed は ICE が尽きた状態で、
-  // 同じ経路の作り直しでは戻らない
-  if (state === "failed") return everConnected ? "lost" : "failed";
+  // **failed もつなぎ直しの対象にする（段階6の改修）。**
+  //
+  //   以前はここで "lost" を返し、一度つながった後の failed で通話を終えていた。
+  //   根拠として「ICE が尽きた状態で、同じ経路の作り直しでは戻らない」と書いていたが、
+  //   **これは誤りだった。** 実測では、failed の後でも経路を作り直せば connected へ戻る。
+  //   iceRestart は候補を集め直すため、尽きたのは「前回集めた候補」であって
+  //   「集められる候補」ではない。
+  //
+  //   加えて、実測では disconnected から failed までが約10秒しかない。
+  //   ここで打ち切ると、60秒の期限は一度も使われないまま通話が終わっていた。
+  //
+  // 通話を終えるのは、期限（RECONNECT_LIMIT_MS）を過ぎたときだけにする。
+  // "lost" はその経路（onReconnectGiveUp）からのみ立つ
+  if (state === "failed") return everConnected ? "reconnecting" : "failed";
   // 繋がる前の disconnected は途中の状態。まだ「切れた」とは言えない。
   // 一度繋がった後の disconnected は、つなぎ直しを試みる（段階6）
   if (state === "disconnected") return everConnected ? "reconnecting" : prev;
@@ -96,6 +134,87 @@ export function voiceStatusText(phase: VoicePhase): string {
   if (phase === "lost") return "通話が切れました";
   return "つないでいます";
 }
+
+// ── 送れなかった合図の控え（段階6の改修） ──────────────────────────────────
+//
+// ここに置く理由:
+//   **判定は webrtc.ts に置き、画面は呼ぶだけにする。** このファイルが既に取っている形に揃える。
+//   画面側に条件を書くと、控える対象が通話の都合ではなく画面の都合で決まるようになり、
+//   対象が広がったことに気づけなくなる。ここに置けば Node からそのまま駆動して確かめられる。
+
+/**
+ * 送れなかったときに控える合図の種別。
+ *
+ * **つなぎ直しに関わる3種だけを対象にする。ここを広げないこと。**
+ * 在席や呼びかけを控えて後から送ると、実体とずれた主張が遅れて届くことになる
+ * （既に離席した人を在席として送り直すなど）。
+ * 合図は相手のブラウザが解釈するもので、古ければ相手側が捨てる
+ */
+export const HELD_SIGNAL_TYPES = ["call.offer", "call.answer", "call.candidate"] as const;
+
+/** 控える対象の合図か。**対象を絞っているのはここ1か所だけ** */
+export function isHeldSignal(obj: unknown): boolean {
+  const type = (obj as { type?: unknown } | null | undefined)?.type;
+  return typeof type === "string" && (HELD_SIGNAL_TYPES as readonly string[]).includes(type);
+}
+
+/**
+ * 送れなかった合図の控え。**最新の1件だけを持つ。溜め込まない。**
+ *
+ * 作り直しは期限まで繰り返し行われるため、溜めると繋がり直した瞬間に
+ * 古い接続情報が何通も飛び、最後に届いたものが勝つ。それなら最初から最新の1件でよい
+ */
+export type HeldSignal = { held: unknown };
+export function createHeldSignal(): HeldSignal { return { held: null }; }
+
+/** 送り先の最小の形。WebSocket でも、試験の偽物でもこれを満たす */
+type SocketLike = { readyState: number; send(data: string): void };
+/** WebSocket.OPEN の値。定数を持ち込まずに済ませるため、ここに書く */
+const WS_OPEN = 1;
+
+/**
+ * 合図を送る。送れなければ、対象のものだけを控える。
+ *
+ * **閉じている間の送信は、これまで黙って捨てられていた。**
+ *   つなぎ直しは「作り直した接続情報を相手へ届ける」ことで成り立つ。
+ *   ところが回線が切れているときは、音声の経路と WebSocket の両方が同時に落ちる。
+ *   そのため作り直しの接続情報がまさに捨てられ、相手には何も届かず、
+ *   60秒の期限を待って通話が終わっていた。
+ *
+ * 戻り値は「いま送れたか」。控えたかどうかではない
+ */
+export function sendOrHold(socket: SocketLike | null, obj: unknown, held: HeldSignal): boolean {
+  if (!socket || socket.readyState !== WS_OPEN) {
+    if (isHeldSignal(obj)) {
+      held.held = obj;
+      console.log("[voice] 送れなかった合図を控えた: " + (obj as { type: string }).type);
+    }
+    return false;
+  }
+  socket.send(JSON.stringify(obj));
+  return true;
+}
+
+/**
+ * 繋がり直したときに、控えてある合図を送り直す。
+ *
+ * **通話が終わっていれば送り直さない**（inCall で渡す）。
+ * 終わった通話の接続情報が届くと、相手が別の通話を始めていた場合にそれを壊しうる。
+ * 控えは、送っても送らなくてもここで必ず消す（次の切断まで持ち越さない）。
+ *
+ * 戻り値は「送り直したか」
+ */
+export function resendHeld(socket: SocketLike | null, held: HeldSignal, inCall: boolean): boolean {
+  const obj = held.held;
+  held.held = null;
+  if (obj === null || obj === undefined) return false;
+  if (!inCall) { console.log("[voice] 控えていた合図を捨てた（通話が終わっている）"); return false; }
+  if (!socket || socket.readyState !== WS_OPEN) return false;
+  socket.send(JSON.stringify(obj));
+  console.log("[voice] 控えていた合図を送り直した: " + (obj as { type: string }).type);
+  return true;
+}
+// ── 控えはここまで ───────────────────────────────────────────────────────
 
 /** 相手へ送る合図。中身は運ぶだけで、ws-server も解釈しない（段階1） */
 export type SignalSender = (msg:
@@ -144,10 +263,12 @@ export type VoiceCall = {
    * 経路の選び直し（ICE のやり直し）だけを行う。相手には既にある call.offer で届くため、
    * ws-server に新しい種別を足す必要はない。
    *
-   * **接続情報を作り直すのは承認した側（callee）だけ。**
-   *   初回と同じ向きに揃えてある（ws-messages.ts の設計メモ 2）。
-   *   両方が同時に作ると衝突して、どちらの接続情報も通らなくなる。
-   *   呼びかけた側は相手の作り直しを待つ。待つ側では false を返す。
+   * **どちらの側からでも作り直せる（段階6の改修）。**
+   *   改修より前は承認した側（callee）だけが作り直していたため、
+   *   承認した側が動けない場合、呼びかけた側は自力で復帰する手段を持たなかった。
+   *   実測では、呼びかけた側からの作り直しでも復帰する。
+   *   衝突は、向きを固定するのではなく **利用者IDによる先後** で避ける
+   *   （RESTART_FOLLOWER_DELAY_MS を参照）。
    *
    * 戻り値は「自分から作り直しを送ったか」であり、繋がり直せたかではない。
    * 繋がり直せたかは connectionState が connected へ戻るかで判る
@@ -165,6 +286,14 @@ export type VoiceCall = {
  */
 export async function startVoice(opts: {
   peerId: number;
+  /**
+   * 自分の利用者ID（段階6の改修）。
+   *
+   * つなぎ直しで、どちらが先に接続情報を作り直すかを決めるためだけに使う。
+   * 相談せずに両側が同じ答えを出せる必要があるため、両側が知っている値で決める。
+   * 自分のIDと相手のIDは、どちらの側でも既に分かっている
+   */
+  selfId: number;
   role: "caller" | "callee";
   send: SignalSender;
   onRemoteStream: (stream: MediaStream) => void;
@@ -187,6 +316,14 @@ export async function startVoice(opts: {
    */
   reconnectLimitMs?: number;
   /**
+   * 作り直しを繰り返す間隔。**既定は RESTART_INTERVAL_MS。試験でだけ短くする。**
+   */
+  restartIntervalMs?: number;
+  /**
+   * 利用者IDが大きい側が待つ時間。**既定は RESTART_FOLLOWER_DELAY_MS。試験でだけ短くする。**
+   */
+  followerDelayMs?: number;
+  /**
    * 時計。**試験で差し替えるためだけにある。** 既定はブラウザの setTimeout。
    * 差し替えられるようにしてあるのは、期限の判定を実際に60秒待たずに確かめるため
    */
@@ -195,8 +332,10 @@ export async function startVoice(opts: {
     clear: (handle: unknown) => void;
   };
 }): Promise<VoiceCall> {
-  const { peerId, role, send, onRemoteStream, onState, onReconnectGiveUp } = opts;
+  const { peerId, selfId, role, send, onRemoteStream, onState, onReconnectGiveUp } = opts;
   const reconnectLimitMs = opts.reconnectLimitMs ?? RECONNECT_LIMIT_MS;
+  const restartIntervalMs = opts.restartIntervalMs ?? RESTART_INTERVAL_MS;
+  const followerDelayMs = opts.followerDelayMs ?? RESTART_FOLLOWER_DELAY_MS;
   const timers = opts.timers ?? {
     set: (fn: () => void, ms: number) => setTimeout(fn, ms),
     clear: (h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>),
@@ -351,25 +490,34 @@ export async function startVoice(opts: {
   let reconnecting = false;
   let gaveUp = false;
   let limitTimer: unknown = null;
+  let restartTimer: unknown = null;
 
   const clearLimit = () => {
     if (limitTimer !== null) { timers.clear(limitTimer); limitTimer = null; }
   };
+  const clearRestartTimer = () => {
+    if (restartTimer !== null) { timers.clear(restartTimer); restartTimer = null; }
+  };
 
-  /** 経路を作り直す。承認した側だけが送る（衝突を避けるため） */
+  /**
+   * つなぎ直しで、自分が先に作り直す側か（段階6の改修）。
+   *
+   * **ここが先後を決めている唯一の場所。** 利用者IDの小さい側が先に作り直し、
+   * 大きい側は followerDelayMs だけ待つ。両側が同じ2つのIDを見て決めるため、
+   * 相談なしに必ず食い違わない答えになる
+   */
+  const restartsFirst = selfId < peerId;
+
+  /** 経路を作り直す。**どちらの側からでも送れる**（先後で衝突を避ける） */
   const doRestart = async (): Promise<boolean> => {
     if (closed) return false;
-    if (role !== "callee") {
-      console.log("[voice] つなぎ直し: 相手の作り直しを待つ");
-      return false;
-    }
     try {
       // iceRestart で経路の候補を集め直す。**トラックは差し替えない**ので、
       // マイクは掴んだままになる（つなぎ直しの間も離さない）
       const offer = await pc.createOffer({ iceRestart: true });
       await pc.setLocalDescription(offer);
       send({ type: "call.offer", to: peerId, sdp: offer.sdp ?? "" });
-      console.log("[voice] つなぎ直し: 経路を作り直して送った");
+      console.log("[voice] つなぎ直し: 経路を作り直して送った（自分=" + selfId + " 相手=" + peerId + " 順序=" + (restartsFirst ? "先" : "後") + "）");
       return true;
     } catch (e) {
       // 作り直せなくても通話は畳まない。期限の判定に任せる
@@ -378,24 +526,58 @@ export async function startVoice(opts: {
     }
   };
 
+  /**
+   * 次の作り直しを予約する（段階6の改修）。
+   *
+   * **connected へ戻っていれば作り直さない。** 予約が残っていても、
+   * 発火した時点で状態を見て降りる。つなぎ直しが終わった後に
+   * 作り直しの接続情報を送ると、繋がっている通話を壊すことになる
+   */
+  const scheduleRestart = (delayMs: number) => {
+    clearRestartTimer();
+    restartTimer = timers.set(() => {
+      restartTimer = null;
+      if (closed || !reconnecting || gaveUp) return;
+      if (pc.connectionState === "connected") return;
+      void doRestart();
+      // 期限を過ぎるまで繰り返す。打ち切るのは limitTimer の仕事
+      scheduleRestart(restartIntervalMs);
+    }, delayMs);
+  };
+
   const beginReconnect = () => {
     // **既に始まっていれば何もしない。** disconnected は繋がらない間ずっと届くため、
-    // そのたびに数え直すと期限が後ろへずれ、いつまでも打ち切られなくなる
+    // そのたびに数え直すと期限が後ろへずれ、いつまでも打ち切られなくなる。
+    // failed もここへ来るようになったため（段階6の改修）、この見張りがないと
+    // disconnected → failed の2回で期限が二重に立つ
     if (closed || reconnecting || gaveUp) return;
     reconnecting = true;
-    console.log("[voice] つなぎ直しを始める（" + Math.round(reconnectLimitMs / 1000) + "秒まで待つ）");
-    void doRestart();
+    console.log("[voice] つなぎ直しを始める（" + Math.round(reconnectLimitMs / 1000) + "秒まで待つ / 作り直しの順序: " +
+      (restartsFirst ? "先" : "後（" + followerDelayMs + "ms 待つ）") + "）");
+    // 小さいIDの側はすぐ作り直す。大きいIDの側は待ち、
+    // その時点でまだ connected へ戻っていなければ作り直す
+    if (restartsFirst) {
+      void doRestart();
+      scheduleRestart(restartIntervalMs);
+    } else {
+      scheduleRestart(followerDelayMs);
+    }
     limitTimer = timers.set(() => {
       limitTimer = null;
       if (closed || !reconnecting) return;
       reconnecting = false;
       gaveUp = true;
+      // 期限を過ぎたので、以後の作り直しも止める
+      clearRestartTimer();
       console.log("[voice] つなぎ直しの期限を過ぎた。通話を終える");
       onReconnectGiveUp?.();
     }, reconnectLimitMs);
   };
 
   const endReconnect = () => {
+    // connected へ戻った時点で、予約してある作り直しも取り消す（段階6の改修）。
+    // 残しておくと、繋がった後に作り直しの接続情報が飛んで通話を壊す
+    clearRestartTimer();
     if (!reconnecting) { clearLimit(); return; }
     reconnecting = false;
     clearLimit();
@@ -429,10 +611,15 @@ export async function startVoice(opts: {
     // つなぎ直しの出入り（段階6）。**画面へ伝える前に決める。**
     //   connected へ戻れば、つなぎ直しは終わり（通話は続く）
     //   一度繋がった後の disconnected なら、つなぎ直しを始める
-    //   failed はつなぎ直さない。ICE が尽きた状態で、作り直しでは戻らない
+    //   **一度繋がった後の failed も同じ扱いにする（段階6の改修）。**
+    //     改修より前は、ここで reconnecting を降ろし期限も消していた。
+    //     実測では disconnected から failed までが約10秒しかなく、
+    //     そのため60秒の期限は一度も使われずに通話が終わっていた。
+    //     failed でも経路を作り直せば復帰することは実測で確かめてある。
+    //     beginReconnect は二重に始まらない作りなので、
+    //     disconnected の後に failed が来ても期限は数え直されない（数え続ける）
     if (s === "connected") endReconnect();
-    else if (s === "disconnected" && everConnected) beginReconnect();
-    else if (s === "failed") { reconnecting = false; clearLimit(); }
+    else if ((s === "disconnected" || s === "failed") && everConnected) beginReconnect();
 
     onState?.(s);
   };
@@ -490,6 +677,7 @@ export async function startVoice(opts: {
       // つなぎ直しの時計も止める（段階6）。残すと、閉じた通話に対して期限が鳴る
       reconnecting = false;
       clearLimit();
+      clearRestartTimer();
 
       closed = true;
       // **マイクを先に止める。** 後回しにすると、閉じる途中で失敗したときに掴んだままになる。

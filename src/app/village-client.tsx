@@ -28,7 +28,11 @@ import {
 import { applyDrift, buildDriftPlan, driftOffsetsAt, type DriftPlan } from "@/village/demo-drift";
 import SidePanel, { SIDE_PANEL_W } from "./side-panel";
 import type { MonthlyResult } from "@/lib/monthly-format";
-import { startVoice, nextVoicePhase, voiceStatusText, type VoiceCall, type VoicePhase } from "@/lib/webrtc";
+import {
+  startVoice, nextVoicePhase, voiceStatusText,
+  createHeldSignal, sendOrHold, resendHeld,
+  type VoiceCall, type VoicePhase,
+} from "@/lib/webrtc";
 import { playRing } from "@/lib/ring";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080";
@@ -257,6 +261,10 @@ export default function VillagePage({
   // 承認した側は即座に offer を送るが、呼びかけた側はマイクの許可を待っている間に
   // それを受け取ることがある。捨てると通話が始まらない
   const pendingSignalsRef = useRef<{ kind: "offer" | "answer" | "candidate"; value: unknown }[]>([]);
+  // WebSocket が閉じている間に送れなかった、つなぎ直しに関わる合図の控え（段階6の改修）。
+  // **最新の1件だけを持つ。** 繋がり直したときに送り直し、控えは消す。
+  // 何を控えるか・いつ送り直すかの判定は webrtc.ts にある。ここは入れ物を持つだけ
+  const heldSignalRef = useRef(createHeldSignal());
   // 相手の声を鳴らす要素。canvas には音を出せないので DOM に置く
   const audioRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => { callRef.current = call; }, [call]);
@@ -268,11 +276,10 @@ export default function VillagePage({
   // 「いま操作した」を記録する。描画中に Date.now() を呼ばないための入れ物
   const touchActivity = useCallback(() => { lastActiveRef.current = Date.now(); }, []);
 
+  // 送れなかった場合、つなぎ直しに関わる合図だけを控える（段階6の改修）。
+  // **判定は webrtc.ts の sendOrHold が持っている。ここでは呼ぶだけ**
   const send = useCallback((obj: unknown) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify(obj));
-    return true;
+    return sendOrHold(wsRef.current, obj, heldSignalRef.current);
   }, []);
 
   const announce = useCallback((state: Presence["state"], talkStatus: TalkStatus) => {
@@ -288,6 +295,9 @@ export default function VillagePage({
     voiceRef.current?.close();
     voiceRef.current = null;
     pendingSignalsRef.current = [];
+    // 送れずに控えてあった合図も捨てる（段階6の改修）。
+    // 通話が終わった後に送り直すと、閉じた接続に対する接続情報を送ることになる
+    heldSignalRef.current.held = null;
     // 次の通話はミュートしていない状態から始める
     setMuted(false);
     // マイクの可否は通話ごとに調べ直す。前の通話の結果を持ち越さない
@@ -533,6 +543,9 @@ export default function VillagePage({
         if (ticket) setSyncStopped(false);
         announce(myStateRef.current, talkRef.current);
         ws.send(JSON.stringify({ type: "presence.sync" }));
+        // 閉じている間に送れなかった合図を送り直す（段階6の改修）。
+        // **通話中かどうかだけをここで渡し、送るかどうかの判定は webrtc.ts が行う**
+        resendHeld(ws, heldSignalRef.current, callRef.current !== null);
       };
       ws.onmessage = (e) => {
         try {
@@ -1278,6 +1291,10 @@ export default function VillagePage({
 
         const v = await startVoice({
           peerId: call.peerId,
+          // つなぎ直しで、どちらが先に経路を作り直すかを決めるために渡す（段階6の改修）。
+          // 決め方は webrtc.ts に置いてある（利用者IDの小さい側が先）。
+          // ここでは値を渡すだけで、判定はしない
+          selfId: userRef.current.id,
           role: call.role,
           iceServers,
           send: (m) => { send(m); },
